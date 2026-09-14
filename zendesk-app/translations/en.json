@@ -1,0 +1,16 @@
+{
+  "app": {
+    "name": "VoBiz Calling App",
+    "description": "VoBiz Calling CTI softphone for Zendesk Support",
+    "parameters": {
+      "backend_url": {
+        "label": "VoBiz Integration Backend URL",
+        "helpText": "The public HTTPS URL of your VoBiz CRM integration backend (e.g. your cloudflared tunnel URL)."
+      },
+      "agent_id": {
+        "label": "Default Agent ID",
+        "helpText": "The agent ID key from your backend's agents.json mapping (e.g. test-agent)."
+      }
+    }
+  }
+}

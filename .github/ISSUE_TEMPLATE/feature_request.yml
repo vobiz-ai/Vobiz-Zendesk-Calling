@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest a capability.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The README's **Known limitations** section lists what is deliberately
+        missing — hold, mute, transfer, conference, Talk Partner Edition call
+        objects, and routing calls to an agent's mobile. If yours is there, a 👍
+        on an existing issue helps more than a new one.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: The agent workflow, not the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true

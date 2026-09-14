@@ -1,0 +1,69 @@
+{
+  "name": "VoBiz Calling App",
+  "author": {
+    "name": "VoBiz Dev Team",
+    "email": "support@vobiz.ai",
+    "url": "https://vobiz.ai"
+  },
+  "defaultLocale": "en",
+  "private": true,
+  "location": {
+    "support": {
+      "background": {
+        "url": "assets/background.html"
+      },
+      "top_bar": {
+        "url": "assets/index.html",
+        "size": {
+          "width": "300px",
+          "height": "530px"
+        },
+        "preloadPane": true,
+        "autoHide": false
+      },
+      "ticket_sidebar": {
+        "url": "assets/sidebar.html",
+        "size": {
+          "width": "100%",
+          "height": "80px"
+        }
+      }
+    }
+  },
+  "parameters": [
+    {
+      "name": "backend_url",
+      "type": "text",
+      "required": true,
+      "secure": false,
+      "default": "http://localhost:8092"
+    },
+    {
+      "name": "agent_id",
+      "type": "text",
+      "required": true,
+      "secure": false,
+      "default": "test-agent"
+    },
+    {
+      "name": "zendesk_subdomain",
+      "type": "text",
+      "required": false,
+      "secure": false
+    },
+    {
+      "name": "zendesk_email",
+      "type": "text",
+      "required": false,
+      "secure": false
+    },
+    {
+      "name": "zendesk_api_token",
+      "type": "text",
+      "required": false,
+      "secure": true
+    }
+  ],
+  "version": "1.0",
+  "frameworkVersion": "2.0"
+}

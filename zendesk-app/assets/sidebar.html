@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Vobiz Calling</title>
+    <script src="https://assets.zendesk.com/apps/sdk/2.0/zaf_sdk.js"></script>
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 12px;
+        color: #49545c;
+        background: transparent;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #e83c00;
+        flex: none;
+      }
+      .hint { line-height: 1.45; }
+    </style>
+  </head>
+  <body>
+    <!--
+      This instance exists so the app can resolve which ticket the agent is
+      looking at. ZAF exposes `ticket.id` only to an instance that is actually
+      in ticket context; the top-bar softphone has none, so without this the
+      call log could never attach to the open ticket and every call created a
+      brand new one instead.
+
+      It renders a single line of text on purpose - the softphone itself lives
+      in the top bar.
+    -->
+    <div class="row">
+      <span class="dot"></span>
+      <span class="hint">Vobiz calls on this ticket are logged here automatically.</span>
+    </div>
+    <script>
+      // Registering the instance is the whole job; the top bar queries it.
+      ZAFClient.init();
+    </script>
+  </body>
+</html>

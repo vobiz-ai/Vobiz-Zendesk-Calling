@@ -1,0 +1,69 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste an Auth Token, a SIP password, or a real customer phone
+        number into a public issue.**
+
+        Two things to check first, because they explain most reports:
+        - If the call connects and the customer hears silence, your SIP endpoint
+          was not registered. The CDR will show `End Of XML Instructions`.
+        - If nothing reaches the backend at all, the tunnel hostname probably
+          changed. Quick tunnels get a new one on every restart.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a ticket
+        2. Click the phone number
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: status
+    attributes:
+      label: What the softphone's status line said
+      placeholder: e.g. "Registration failed"
+  - type: input
+    id: hangup
+    attributes:
+      label: hangup_cause_name from the Vobiz CDR, if the call connected
+      placeholder: e.g. End Of XML Instructions
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - Softphone / SIP registration
+        - Placing or receiving a call
+        - Click-to-dial
+        - Screen pop / caller lookup
+        - Call logging to a ticket
+        - Recording playback
+        - Installation / configuration
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+      placeholder: e.g. Chrome 141 on macOS 15
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Backend log and browser console
+      description: Lines beginning `[VoBiz` are the useful ones. Redact anything sensitive.
+      render: text

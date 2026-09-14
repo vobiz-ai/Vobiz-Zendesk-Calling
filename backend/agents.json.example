@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "Maps an agent identity to a Vobiz SIP endpoint.",
+    "",
+    "The key is the `agent_id` set in the Zendesk app's settings. Give every",
+    "agent their own key, or calls will ring the wrong person.",
+    "",
+    "Create each endpoint in the Vobiz Console, or via the API:",
+    "  POST https://api.vobiz.ai/api/v1/Account/{auth_id}/Endpoint/",
+    "  { \"username\": \"agent-priya\", \"password\": \"...\", \"alias\": \"Priya\" }",
+    "",
+    "Vobiz appends a numeric suffix to the username you request and returns the",
+    "result. Use the value it returns, not the one you sent. The password is",
+    "never returned again, so record it when you create the endpoint.",
+    "",
+    "Copy this file to agents.json. That file is gitignored - it holds SIP",
+    "passwords and must never be committed."
+  ],
+  "priya": {
+    "name": "Priya Sharma",
+    "sipUser": "agentpriya123456789012345678901",
+    "sipPassword": "REPLACE_WITH_THE_ENDPOINT_PASSWORD",
+    "displayName": "Priya Sharma"
+  },
+  "arjun": {
+    "name": "Arjun Mehta",
+    "sipUser": "agentarjun098765432109876543210",
+    "sipPassword": "REPLACE_WITH_THE_ENDPOINT_PASSWORD",
+    "displayName": "Arjun Mehta"
+  }
+}

@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Syntax and JSON
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm run lint
+
+  secrets:
+    name: No credentials in the tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm run check:secrets
+
+      - name: Config examples must be tracked, real config must not
+        run: |
+          set -e
+          fail=0
+          # These carry secrets and must never be committed.
+          for f in backend/.env backend/agents.json zendesk-app/zcli.apps.config.json; do
+            if ! git check-ignore -q "$f"; then
+              echo "::error::$f is NOT gitignored — it holds credentials"
+              fail=1
+            fi
+          done
+          # These are templates and must stay visible, which is easy to break:
+          # a pattern of '*.env' does not match a filename ending in '.example'.
+          for f in backend/.env.example backend/agents.json.example; do
+            if git check-ignore -q "$f"; then
+              echo "::error::$f IS gitignored — the template would be invisible"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  app:
+    name: Zendesk app manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Manifest declares what the app actually reads
+        run: |
+          node -e '
+            const m = require("./zendesk-app/manifest.json");
+            const fs = require("node:fs");
+            let fail = false;
+
+            // Every location must point at a file that exists.
+            for (const [name, loc] of Object.entries(m.location.support)) {
+              const p = "zendesk-app/" + loc.url;
+              if (!fs.existsSync(p)) {
+                console.error(`FAIL  location ${name} → missing ${loc.url}`);
+                fail = true;
+              } else {
+                console.log(`ok    location ${name} → ${loc.url}`);
+              }
+            }
+
+            // A setting the app reads but the manifest does not declare is
+            // always undefined at runtime. That bug shipped once already.
+            const declared = new Set(m.parameters.map(p => p.name));
+            const app = fs.readFileSync("zendesk-app/assets/scripts/app.js", "utf8");
+            for (const used of app.matchAll(/metadata\.settings\.([a-z_]+)/g)) {
+              if (!declared.has(used[1])) {
+                console.error(`FAIL  app.js reads settings.${used[1]}, not declared in manifest`);
+                fail = true;
+              } else {
+                console.log(`ok    setting ${used[1]} declared`);
+              }
+            }
+
+            // ticket_sidebar is what lets the app resolve ticket context.
+            if (!m.location.support.ticket_sidebar) {
+              console.error("FAIL  no ticket_sidebar — call logs cannot attach to the open ticket");
+              fail = true;
+            }
+
+            if (fail) process.exit(1);
+            console.log("\nManifest is consistent with the code.");
+          '

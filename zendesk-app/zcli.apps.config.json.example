@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy to zcli.apps.config.json. zcli reads that exact filename; a file named zcli.json is ignored. The copy is gitignored because it may hold a Zendesk API token.",
+  "parameters": {
+    "backend_url": "http://localhost:8092",
+    "agent_id": "priya",
+    "zendesk_subdomain": "",
+    "zendesk_email": "",
+    "zendesk_api_token": ""
+  }
+}

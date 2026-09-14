@@ -1,0 +1,27 @@
+# Secrets and local configuration — NEVER commit these
+.env
+.env.*
+!.env.example
+backend/.env
+backend/agents.json
+zendesk-app/zcli.apps.config.json
+zendesk-app/settings.json
+
+# Runtime state
+backend/tunnel-url.txt
+tunnel-url.txt
+*.log
+
+# Build output
+zendesk-app/tmp/
+dist/
+*.zip
+
+# Dependencies
+node_modules/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

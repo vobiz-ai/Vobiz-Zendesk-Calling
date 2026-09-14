@@ -1,0 +1,23 @@
+{
+  "name": "vobiz-zendesk-calling",
+  "version": "1.0.0",
+  "description": "Vobiz calling app for Zendesk — browser softphone, screen pop, and call logging",
+  "private": true,
+  "license": "MIT",
+  "author": "Vobiz",
+  "homepage": "https://vobiz.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vobiz-ai/Vobiz-Zendesk-Calling.git"
+  },
+  "scripts": {
+    "start": "node backend/server.js",
+    "lint": "node scripts/lint.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "validate:app": "zcli apps:validate ./zendesk-app",
+    "tunnel": "cloudflared tunnel --url http://localhost:8092"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
