@@ -18,6 +18,19 @@ const SKIP = new Set([
   "scripts",
 ]);
 
+/*
+ * Files that are gitignored (local config) or that legitimately contain long
+ * random-looking strings (npm integrity hashes). Scanning them produces noise
+ * that trains people to ignore this tool, which defeats the point.
+ */
+const SKIP_FILES = [
+  /(^|\/)\.env$/,
+  /(^|\/)\.env\..*$/,
+  /(^|\/)agents\.json$/,
+  /(^|\/)zcli\.apps\.config\.json$/,
+  /(^|\/)package-lock\.json$/,
+];
+
 const RULES = [
   {
     name: "Vobiz auth ID",
@@ -57,6 +70,7 @@ walk(".");
 
 let found = 0;
 for (const f of files) {
+  if (SKIP_FILES.some((re) => re.test(f))) continue;
   let text;
   try {
     text = readFileSync(f, "utf8");

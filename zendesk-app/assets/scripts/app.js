@@ -120,7 +120,9 @@ async function init() {
   if (settingsToggleBtn) {
     settingsToggleBtn.addEventListener("click", () => {
       const loginView = document.getElementById("login-view");
-      if (loginView.style.display === "none") {
+      // The panel starts hidden via a class rather than an inline style, so
+      // read the computed value instead of the style attribute.
+      if (getComputedStyle(loginView).display === "none") {
         showView("login");
       } else {
         showView("dialer");
@@ -269,11 +271,47 @@ window.pressKey = function(key) {
   }
 };
 
+/**
+ * Status is two things, not one.
+ *
+ * The header carries a short STATE ("Ready", "Offline", "On a call") — that is
+ * what a badge is for. The full sentence, which can run past sixty characters,
+ * goes in a message row beneath it where there is room to read it.
+ *
+ * Cramming a sentence into a nowrap pill is what made the header overflow.
+ */
+function statusState(text, statusClass) {
+  const t = String(text || "");
+  if (/^ready/i.test(t)) return { label: "Ready", tone: "ok" };
+  if (/^on a call/i.test(t)) return { label: "On a call", tone: "busy" };
+  if (/^ringing|^incoming/i.test(t)) return { label: "Ringing", tone: "busy" };
+  if (/^auth required/i.test(t)) return { label: "Sign in", tone: "pending" };
+  if (/^authenticating|^connecting|^registering|^saving/i.test(t)) {
+    return { label: "Connecting", tone: "pending" };
+  }
+  if (statusClass === "status-error" || /failed|cannot reach|config error/i.test(t)) {
+    return { label: "Offline", tone: "error" };
+  }
+  if (statusClass === "status-ready") return { label: "Ready", tone: "ok" };
+  return { label: "Offline", tone: "error" };
+}
+
 function setStatus(text, statusClass) {
   const el = document.getElementById("status");
+  const msg = document.getElementById("status-message");
+  const { label, tone } = statusState(text, statusClass);
+
   if (el) {
-    el.textContent = text;
-    el.className = statusClass || '';
+    el.textContent = label;
+    el.className = `status-badge is-${tone}`;
+  }
+
+  if (msg) {
+    // Only show the sentence when it says more than the badge already does.
+    const redundant = label.toLowerCase() === String(text || "").trim().toLowerCase().replace(/[.…]+$/, "");
+    msg.textContent = redundant ? "" : text;
+    msg.hidden = redundant;
+    msg.className = `status-message is-${tone}`;
   }
 }
 
