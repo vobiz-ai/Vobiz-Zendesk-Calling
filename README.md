@@ -9,7 +9,7 @@
 [![Zendesk ZAF v2](https://img.shields.io/badge/Zendesk-ZAF%20v2-03363d.svg)](https://developer.zendesk.com/documentation/apps/)
 [![Node 18+](https://img.shields.io/badge/Node-18%2B-339933.svg)](https://nodejs.org)
 
-[Install](docs/install.md) · [Architecture](docs/architecture.md) · [Backend contract](docs/backend-contract.md) · [Testing](docs/testing.md)
+[Install](docs/install.md) · [Testing](docs/testing.md) · [Architecture](docs/architecture.md) · [Backend contract](docs/backend-contract.md) · [Open issues](ISSUES.md) · [Marketplace](MARKETPLACE.md)
 
 </div>
 
@@ -25,6 +25,12 @@
 | **Recordings** | Playable from the ticket, behind an expiring link that never carries your API credentials. |
 | **Transcripts** | An optional webhook appends an AI transcript to the ticket as a private comment. |
 | **Browser audio** | Calls run over WebRTC in the tab. No desk phone, no desktop app. |
+
+**Verified end to end on 17 September 2026** on a live account: outbound
+connected and billed, session recordings delivered, and inbound PSTN → browser
+connected too — B leg answered, 12 seconds billed, confirmed in the CDR rather
+than the UI. Inbound had been blocked platform-side for the two weeks before
+that; read [`ISSUES.md`](ISSUES.md) #1 before relying on it.
 
 ## How it fits together
 

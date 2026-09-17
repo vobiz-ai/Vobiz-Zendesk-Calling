@@ -1,32 +1,27 @@
 {
-  "name": "VoBiz Calling App",
+  "name": "Vobiz Calling",
   "author": {
-    "name": "VoBiz Dev Team",
+    "name": "Vobiz",
     "email": "support@vobiz.ai",
     "url": "https://vobiz.ai"
   },
   "defaultLocale": "en",
-  "private": true,
+  "private": false,
+  "termsConditionsURL": "https://vobiz.ai/terms",
   "location": {
     "support": {
-      "background": {
-        "url": "assets/background.html"
-      },
       "top_bar": {
         "url": "assets/index.html",
-        "size": {
-          "width": "300px",
-          "height": "530px"
-        },
+        "size": { "width": "340px", "height": "560px" },
         "preloadPane": true,
         "autoHide": false
       },
       "ticket_sidebar": {
         "url": "assets/sidebar.html",
-        "size": {
-          "width": "100%",
-          "height": "80px"
-        }
+        "size": { "width": "100%", "height": "140px" }
+      },
+      "background": {
+        "url": "assets/background.html"
       }
     }
   },
@@ -35,35 +30,22 @@
       "name": "backend_url",
       "type": "text",
       "required": true,
-      "secure": false,
-      "default": "http://localhost:8092"
+      "secure": false
     },
     {
       "name": "agent_id",
       "type": "text",
       "required": true,
+      "secure": false
+    },
+    {
+      "name": "registrar_url",
+      "type": "text",
+      "required": false,
       "secure": false,
-      "default": "test-agent"
-    },
-    {
-      "name": "zendesk_subdomain",
-      "type": "text",
-      "required": false,
-      "secure": false
-    },
-    {
-      "name": "zendesk_email",
-      "type": "text",
-      "required": false,
-      "secure": false
-    },
-    {
-      "name": "zendesk_api_token",
-      "type": "text",
-      "required": false,
-      "secure": true
+      "default": "wss://registrar.vobiz.ai:5063/"
     }
   ],
-  "version": "1.0",
+  "version": "2.0.0",
   "frameworkVersion": "2.0"
 }

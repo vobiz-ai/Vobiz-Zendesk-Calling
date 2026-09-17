@@ -8,7 +8,15 @@
     <!-- Zendesk Apps Framework SDK -->
     <script src="https://assets.zendesk.com/apps/sdk/2.0/zaf_sdk.js"></script>
     <!-- JsSIP WebRTC Client -->
-    <script src="https://cdn.jsdelivr.net/npm/jssip@3/dist/jssip.min.js"></script>
+    <!-- JsSIP, vendored. Not a CDN: npm's jssip ships no browser bundle at
+         dist/jssip.min.js, so an exact-version CDN URL 404s and only the
+         floating @3 range resolves — which means the shipped app could change
+         behaviour under you with no commit here. A 404 leaves JsSIP undefined
+         and the panel frozen on "Registering…" with no error at all.
+           npm i jssip@3.10.1 && npx esbuild entry.js --bundle --minify \
+             --format=iife --global-name=JsSIP --outfile=assets/lib/jssip.min.js
+         where entry.js is: module.exports = require('jssip'); -->
+    <script src="lib/jssip.min.js"></script>
     <!-- Custom Style -->
     <link rel="stylesheet" type="text/css" href="styles/style.css" />
   </head>
@@ -83,7 +91,8 @@
             </svg>
             Authenticate &amp; save
           </button>
-          <p class="hint">Credentials stay in your browser session and are sent only to your calling backend.</p>
+          <p id="vobiz-login-status" class="hint"></p>
+          <p class="hint">Your Auth Token is sent to your calling backend once and exchanged for a session. It is never stored in this browser.</p>
         </section>
       </div>
 
@@ -152,6 +161,7 @@
               Call
             </button>
           </div>
+          <p id="dial-hint" class="hint"></p>
         </section>
       </div>
 

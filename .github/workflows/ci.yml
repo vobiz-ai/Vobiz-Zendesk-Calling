@@ -35,7 +35,7 @@ jobs:
           set -e
           fail=0
           # These carry secrets and must never be committed.
-          for f in backend/.env backend/agents.json zendesk-app/zcli.apps.config.json; do
+          for f in backend/.env zendesk-app/zcli.apps.config.json; do
             if ! git check-ignore -q "$f"; then
               echo "::error::$f is NOT gitignored — it holds credentials"
               fail=1
@@ -43,7 +43,7 @@ jobs:
           done
           # These are templates and must stay visible, which is easy to break:
           # a pattern of '*.env' does not match a filename ending in '.example'.
-          for f in backend/.env.example backend/agents.json.example; do
+          for f in backend/.env.example; do
             if git check-ignore -q "$f"; then
               echo "::error::$f IS gitignored — the template would be invisible"
               fail=1
@@ -82,12 +82,25 @@ jobs:
             // always undefined at runtime. That bug shipped once already.
             const declared = new Set(m.parameters.map(p => p.name));
             const app = fs.readFileSync("zendesk-app/assets/scripts/app.js", "utf8");
-            for (const used of app.matchAll(/metadata\.settings\.([a-z_]+)/g)) {
-              if (!declared.has(used[1])) {
-                console.error(`FAIL  app.js reads settings.${used[1]}, not declared in manifest`);
+
+            // Matches both `metadata.settings.x` and the destructured form
+            // `settings.x`, so refactoring how the object is obtained does not
+            // silently switch this guard off. It caught a real shipped bug
+            // (settings read but never declared, so always undefined); a guard
+            // that matches nothing is worse than no guard, because it still
+            // reports "ok".
+            const reads = new Set();
+            for (const m2 of app.matchAll(/(?:metadata\.)?settings\.([a-z_]+)/g)) reads.add(m2[1]);
+            if (reads.size === 0) {
+              console.error("FAIL  found no settings reads in app.js — this check has stopped working");
+              fail = true;
+            }
+            for (const used of reads) {
+              if (!declared.has(used)) {
+                console.error(`FAIL  app.js reads settings.${used}, not declared in manifest`);
                 fail = true;
               } else {
-                console.log(`ok    setting ${used[1]} declared`);
+                console.log(`ok    setting ${used} declared`);
               }
             }
 

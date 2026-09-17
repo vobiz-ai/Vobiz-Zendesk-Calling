@@ -3,7 +3,6 @@
 .env.*
 !.env.example
 backend/.env
-backend/agents.json
 zendesk-app/zcli.apps.config.json
 zendesk-app/settings.json
 

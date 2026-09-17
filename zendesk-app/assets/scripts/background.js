@@ -1,45 +1,42 @@
+/** === Vobiz Calling — background relay ===
+ *
+ * Zendesk emits `voice.dialout` when an agent clicks a phone number anywhere in
+ * Support. This forwards it to the top_bar panel, which owns the SIP stack.
+ *
+ * `voice.dialout` only fires on Talk Partner Edition. On other plans this
+ * listener is simply never called, which is why the ticket sidebar also offers
+ * a Call button — the two paths converge on the same `cti.triggerDialer` event.
+ */
 const client = ZAFClient.init();
 
-// Helper to find the top_bar client instance
-function getTopBarClient() {
-  return client.get('instances').then(instancesData => {
-    const instances = instancesData.instances;
-    for (const guid in instances) {
-      if (instances[guid].location === 'top_bar') {
-        return client.instance(guid);
-      }
-    }
-    return null;
-  });
+async function getTopBarClient() {
+  const { instances } = await client.get("instances");
+  const guid = Object.keys(instances).find(g => instances[g].location === "top_bar");
+  return guid ? client.instance(guid) : null;
 }
 
-// Listen to Zendesk click-to-dial event
-client.on('voice.dialout', function(event) {
-  console.log('[VoBiz Background] Click-to-dial event triggered for number:', event.number);
+client.on("voice.dialout", async event => {
+  const number = event && event.number;
+  if (!number) return;
+  console.log("[Vobiz] click-to-dial:", number);
 
-  getTopBarClient().then(topBarClient => {
-    if (topBarClient) {
-      // 1. Force the top bar panel to slide open/popover
-      topBarClient.invoke('popover', 'show')
-        .then(() => {
-          console.log('[VoBiz Background] Top bar pane displayed.');
-        })
-        .catch(err => {
-          console.error('[VoBiz Background] Error opening popover:', err);
-        });
-
-      // 2. Trigger the dialer event inside the top bar softphone
-      topBarClient.trigger('cti.triggerDialer', {
-        number: event.number,
-        userId: event.userId,
-        ticketId: event.ticketId
-      });
-    } else {
-      console.warn('[VoBiz Background] top_bar app instance not found. Make sure it is preloaded.');
+  try {
+    const topBar = await getTopBarClient();
+    if (!topBar) {
+      console.warn("[Vobiz] No top_bar instance found — is preloadPane still set in the manifest?");
+      return;
     }
-  }).catch(err => {
-    console.error('[VoBiz Background] Error locating top_bar instance:', err);
-  });
+    // Open the panel first so the agent sees the call start. A rejected popover
+    // (already open) must not stop the dial from being triggered.
+    await topBar.invoke("popover", "show").catch(() => {});
+    topBar.trigger("cti.triggerDialer", {
+      number,
+      userId: event.userId,
+      ticketId: event.ticketId,
+    });
+  } catch (err) {
+    console.error("[Vobiz] Could not relay the click-to-dial event:", err);
+  }
 });
 
-console.log('[VoBiz Background] Background listener initialized successfully.');
+console.log("[Vobiz] background relay ready");

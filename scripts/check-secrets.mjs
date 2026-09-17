@@ -24,6 +24,11 @@ const SKIP = new Set([
  * that trains people to ignore this tool, which defeats the point.
  */
 const SKIP_FILES = [
+  // Vendored third-party bundles. jssip.min.js is 280KB of minified code and
+  // matches the "long random-looking string" rule on almost every line. Same
+  // reasoning as package-lock.json below: noise here trains people to ignore
+  // real hits.
+  /(^|\/)assets\/lib\//,
   /(^|\/)\.env$/,
   /(^|\/)\.env\..*$/,
   /(^|\/)agents\.json$/,

@@ -3,6 +3,74 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] — 2026-09-17
+
+Rebuilt on the browser-as-A-leg architecture. **Breaking:** the backend no
+longer originates calls over the REST API, SIP credentials move from
+`agents.json` to `.env`, and the browser exchanges its Vobiz credentials for a
+session token instead of holding them.
+
+### Changed
+- **The browser is now the A leg.** The panel sends the SIP INVITE itself and
+  the backend answers `<Dial><Number>`. The previous design — backend dials the
+  customer, then bridges the browser in with `<Dial><User>` — cannot work:
+  routing into a registered WebRTC endpoint is blocked platform-side.
+- `<Dial>` carries `action` and `redirect="false"`. Without them Vobiz
+  re-fetches the answer URL when the dial ends and re-executes the document, so
+  one call dials the customer repeatedly.
+- `<Record recordSession>` is a self-closing sibling **before** `<Dial>`.
+  Nested inside, FreeSWITCH rejects it and the caller hears a bogus "Busy".
+- An `Event=Hangup` request is answered with an empty `<Response>`. Returning
+  `<Dial>` originates a fresh leg after the call has already ended.
+- Inbound `callerId` is normalised to E.164 from the DID that was dialled.
+  Without it Vobiz derives the caller ID from the A leg — the caller's own
+  number, which the account does not own — and refuses to create the B leg.
+- JsSIP is vendored rather than loaded from a CDN. npm's `jssip` ships no
+  browser bundle at `dist/jssip.min.js`, so an exact-version CDN URL 404s and
+  the panel hangs on "Registering…" with no error.
+
+### Added
+- `session_timers: false` — without it Vobiz answers `422 Session Interval Too
+  Small`, JsSIP reports the opaque cause "SIP Failure Code", and no CDR is
+  written at all.
+- A space-free `user_agent`. Vobiz interpolates the registration's User-Agent
+  unescaped into a gateway URI, and JsSIP's default contains a space.
+- STUN on the answer as well as the offer.
+- `/dial-status`, so `DialBLegUUID` is logged — an empty one means no B leg was
+  ever created, whatever the UI showed.
+- `/recording-ready`, the `<Record>` callback, so recordings are collected on a
+  real signal instead of a poll.
+- `/setup`, which binds the SIP endpoint to an application pointing at
+  `/answer`. Unbound, Vobiz has no answer URL to fetch and outbound dies
+  silently. The panel runs it automatically on sign-in.
+- `backend/bootstrap.js`, which creates the SIP endpoint and reads the stored
+  username back — Vobiz rewrites the username you submit.
+- Marketplace assets: `logo.png`, `logo-small.png`, and `icon_top_bar.svg`
+  under the filename Zendesk actually reads. `assets/icon.svg` was ignored, so
+  the top bar rendered no icon.
+- `X-Zendesk-Marketplace-*` headers on Zendesk API requests.
+- `docs/testing.md`, which the README had linked all along.
+
+### Security
+- `GET /agent/:anything` served a real SIP password to anyone who knew the
+  backend URL, via a fallback that invented an agent for any unknown id. SIP
+  credentials now come from `.env` and require a session.
+- Recording links carried the account Auth Token as a query parameter and were
+  written into ticket comments, readable by every agent indefinitely. They are
+  now HMAC-signed with a short expiry and carry no credentials.
+- The Vobiz Auth Token was kept in `localStorage` and re-POSTed on every call.
+  It is now exchanged once for an opaque session token in `sessionStorage`.
+- `Access-Control-Allow-Origin: *` is replaced by an allowlist. The origin that
+  matters is `*.apps.zdusercontent.com` — what ZAF actually iframes apps from,
+  not the helpdesk domain.
+- A hardcoded quick-tunnel fallback host was removed; it would have received
+  credentials once someone else claimed the name.
+
+### Removed
+- `backend/agents.json` and its example. SIP credentials live in `.env`.
+- `POST /start-call` REST origination and `POST /hangup-call`. The browser owns
+  the call leg, so a SIP BYE tears it down.
+
 ## [1.0.0] — 2026-09-14
 
 First public release.

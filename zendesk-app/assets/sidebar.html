@@ -26,6 +26,20 @@
         flex: none;
       }
       .hint { line-height: 1.45; }
+      .stack { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; }
+      .who { font-weight: 600; color: #2f3941; }
+      .call-btn {
+        align-self: flex-start;
+        border: 1px solid #e83c00;
+        background: #e83c00;
+        color: #fff;
+        border-radius: 4px;
+        padding: 5px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .call-btn:disabled { opacity: .45; cursor: not-allowed; }
     </style>
   </head>
   <body>
@@ -43,9 +57,17 @@
       <span class="dot"></span>
       <span class="hint">Vobiz calls on this ticket are logged here automatically.</span>
     </div>
-    <script>
-      // Registering the instance is the whole job; the top bar queries it.
-      ZAFClient.init();
-    </script>
+    <!--
+      The one thing worth more than a line of text here: a Call button.
+      Zendesk's own click-to-dial event (voice.dialout, relayed by
+      background.js) only fires on Talk Partner Edition. This path works on
+      every plan, and hands the number to the same top-bar entry point.
+    -->
+    <div class="stack">
+      <span id="sidebar-requester" class="who">Loading requester…</span>
+      <button id="sidebar-call-btn" class="call-btn" disabled>Call requester</button>
+      <span id="sidebar-hint" class="hint"></span>
+    </div>
+    <script src="scripts/sidebar.js"></script>
   </body>
 </html>

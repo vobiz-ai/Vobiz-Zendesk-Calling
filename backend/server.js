@@ -1,561 +1,596 @@
+/**
+ * Vobiz calling backend for the Zendesk CTI app.
+ *
+ * The browser is the A leg. The panel sends the SIP INVITE itself and this
+ * service answers with <Dial><Number> to reach the customer.
+ *
+ * The obvious design — originate to the customer over the REST API, then bridge
+ * the agent's browser in with <Dial><User> — is what this file used to do, and
+ * it does not work. Routing *into* a registered WebRTC endpoint is broken
+ * platform-side: Vobiz builds a gateway URI it cannot parse and drops its own
+ * INVITE ("tr_eval_uri(): invalid uri", "blocking gw"). See ISSUES.md.
+ *
+ * Contract and rationale: ../../README.md and ISSUES.md in this folder.
+ */
 const express = require('express');
-const fetch = require('node-fetch');
-const fs = require('fs');
-const path = require('path');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 require('dotenv').config();
 
 const { syncCallToZendesk, appendTranscription } = require('./zendeskService');
 
-const crypto = require('crypto');
+// ─── config ──────────────────────────────────────────────────────────────────
+const PORT = Number(process.env.PORT || 8092);
+const AUTH_ID = process.env.VOBIZ_AUTH_ID;
+const AUTH_TOKEN = process.env.VOBIZ_AUTH_TOKEN;
+const FROM_NUMBER = process.env.VOBIZ_FROM_NUMBER;
+const SIP_USER = process.env.VOBIZ_SIP_USER;
+const SIP_PASSWORD = process.env.VOBIZ_SIP_PASSWORD;
+const REGISTRAR = process.env.VOBIZ_REGISTRAR || 'registrar.vobiz.ai';
+const PUBLIC_BASE = (process.env.PUBLIC_BASE || '').replace(/\/+$/, '');
 
+const ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN;
+const ZENDESK_EMAIL = process.env.ZENDESK_EMAIL;
+const ZENDESK_API_TOKEN = process.env.ZENDESK_API_TOKEN;
+
+// Used to sign recording URLs. Regenerated on restart if unset, which only
+// means previously-issued playback links stop working — never a security hole.
+const SIGNING_SECRET = process.env.SIGNING_SECRET || crypto.randomBytes(32).toString('hex');
+const RECORDING_URL_TTL_SECONDS = Number(process.env.RECORDING_URL_TTL_SECONDS || 300);
+
+const API_BASE = 'https://api.vobiz.ai/api/v1';
+
+const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+
+for (const [name, value] of Object.entries({ VOBIZ_AUTH_ID: AUTH_ID, VOBIZ_AUTH_TOKEN: AUTH_TOKEN, VOBIZ_FROM_NUMBER: FROM_NUMBER, VOBIZ_SIP_USER: SIP_USER, VOBIZ_SIP_PASSWORD: SIP_PASSWORD })) {
+  if (!value) log(`⚠  ${name} is not set in .env — the panel will not be able to register or call.`);
+}
+
+// ─── state ───────────────────────────────────────────────────────────────────
+// token -> { agentId, authId, numbers, from, createdAt }
+//
+// The Auth Token itself is deliberately NOT kept per session: this backend is
+// bound to one account through .env and uses those credentials for every Vobiz
+// call. /login only proves the agent knows them. Nothing the browser holds can
+// be replayed against the Vobiz API.
+const sessions = new Map();
+// SIP username -> caller ID the agent picked. The /answer webhook has no session
+// (it is Vobiz calling us), so this is how it learns which number to dial out on.
+const fromBySipUser = new Map();
+// A-leg CallUUID -> call record. Recordings are attributed to the A-leg UUID,
+// which is what makes this the right key for both the dial result and the file.
+const callsByUuid = new Map();
+const recentCalls = [];   // newest first, capped
+
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+function newSession(agentId, authId, numbers, from) {
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions.set(token, { agentId, authId, numbers, from, createdAt: Date.now() });
+  return token;
+}
+
+function getSession(req) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!token) return null;
+  const s = sessions.get(token);
+  if (!s) return null;
+  if (Date.now() - s.createdAt > SESSION_TTL_MS) { sessions.delete(token); return null; }
+  return s;
+}
+
+function requireSession(req, res, next) {
+  const s = getSession(req);
+  if (!s) return res.status(401).json({ error: 'Not logged in' });
+  req.session = s;
+  next();
+}
+
+function rememberCall(record) {
+  callsByUuid.set(record.callUuid, record);
+  recentCalls.unshift(record);
+  while (recentCalls.length > 200) {
+    const dropped = recentCalls.pop();
+    if (dropped) callsByUuid.delete(dropped.callUuid);
+  }
+}
+
+// ─── Vobiz REST ──────────────────────────────────────────────────────────────
+async function vobiz(method, apiPath, body) {
+  const url = `${API_BASE}/Account/${AUTH_ID}${apiPath}`;
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'X-Auth-ID': AUTH_ID,
+        'X-Auth-Token': AUTH_TOKEN,
+        Accept: 'application/json',
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const raw = await res.text();
+    let parsed = raw;
+    try { parsed = JSON.parse(raw); } catch { /* keep the raw body */ }
+    return { status: res.status, body: parsed };
+  } catch (err) {
+    return { status: 0, body: { error: err.message } };
+  }
+}
+
+// ─── recording URL signing ───────────────────────────────────────────────────
+// A plain <audio> element cannot send an Authorization header, so playback has
+// to go through a URL that carries its own proof. It must NOT carry the account
+// Auth Token: these links get written into Zendesk ticket comments, where every
+// agent on the account can read them forever.
+function signRecordingUrl(recordingId) {
+  const exp = Math.floor(Date.now() / 1000) + RECORDING_URL_TTL_SECONDS;
+  const sig = crypto.createHmac('sha256', SIGNING_SECRET).update(`${recordingId}|${exp}`).digest('hex');
+  return `${PUBLIC_BASE || ''}/recording-audio/${encodeURIComponent(recordingId)}?exp=${exp}&sig=${sig}`;
+}
+
+function verifyRecordingSignature(recordingId, exp, sig) {
+  if (!exp || !sig) return false;
+  if (Number(exp) < Math.floor(Date.now() / 1000)) return false;
+  const expected = crypto.createHmac('sha256', SIGNING_SECRET).update(`${recordingId}|${exp}`).digest('hex');
+  const a = Buffer.from(String(sig));
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// ─── app ─────────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, '../zendesk-app/assets')));
 
-// Enable CORS for frontend Zendesk integration
+// CORS scoped to the Zendesk origins this app is actually served from. A
+// wildcard here — what this file used to send — lets any page on the internet
+// drive the agent's softphone.
+//
+// The origin that matters is NOT the helpdesk domain. ZAF v2 iframes each app
+// from its own *.apps.zdusercontent.com origin, so that is what the panel's
+// fetches carry in `Origin`. Allowing only *.zendesk.com fails every preflight
+// in production while working fine against zcli locally, which makes it look
+// like the backend went down at install time.
+const ALLOWED_ORIGIN_PATTERNS = [
+  /^https:\/\/[a-z0-9-]+\.apps\.zdusercontent\.com$/i,
+  /^https:\/\/[a-z0-9-]+\.zendesk\.com$/i,
+  /^https:\/\/[a-z0-9.-]+\.zdassets\.com$/i,
+  /^https?:\/\/localhost(:\d+)?$/i,
+  /^https?:\/\/127\.0\.0\.1(:\d+)?$/i,
+];
+const EXTRA_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+  const origin = req.headers.origin;
+  if (origin && (EXTRA_ORIGINS.includes(origin) || ALLOWED_ORIGIN_PATTERNS.some(re => re.test(origin)))) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Vary', 'Origin');
+  }
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  // ngrok-skip-browser-warning must be listed even though the panel only sends
+  // it on ngrok: a header missing from this list fails the CORS preflight, so
+  // the browser never sends the real request — an OPTIONS 204 with no GET.
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, ngrok-skip-browser-warning');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-const PORT = process.env.PORT || 8092;
-const VOBIZ_AUTH_ID = process.env.VOBIZ_AUTH_ID;
-const VOBIZ_AUTH_TOKEN = process.env.VOBIZ_AUTH_TOKEN;
-const VOBIZ_FROM_NUMBER = process.env.VOBIZ_FROM_NUMBER;
-
-// Environment fallbacks for Zendesk REST API access
-const DEFAULT_ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN;
-const DEFAULT_ZENDESK_EMAIL = process.env.ZENDESK_EMAIL;
-const DEFAULT_ZENDESK_API_TOKEN = process.env.ZENDESK_API_TOKEN;
+// ══ Webhooks Vobiz calls ═════════════════════════════════════════════════════
+// Declared first, and never behind requireSession: Vobiz has no session.
 
 /**
- * Escape a value for safe interpolation into XML.
- *
- * `fromNumber` and `inboundNumber` reach the VXML webhook straight from a
- * client request. Interpolating them raw let a caller inject arbitrary verbs
- * into the call flow, e.g. fromNumber='"><Speak>...</Speak><x y="'.
+ * The answer URL of the Vobiz application the agent's SIP endpoint is bound to.
+ * One handler serves both directions; which one it is is decided by who the
+ * call is *from*.
  */
-function escapeXml(value) {
-  return String(value == null ? '' : value).replace(/[<>&'"]/g, ch => ({
-    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'
-  }[ch]));
-}
-
-/** Escape for interpolation into an HTML document body. */
-function escapeHtml(value) {
-  return String(value == null ? '' : value).replace(/[<>&"]/g, ch => ({
-    '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;'
-  }[ch]));
-}
-
-/** Accept only E.164-ish dialable strings in call routing positions. */
-function isDialable(value) {
-  return typeof value === 'string' && /^\+?[0-9]{3,20}$/.test(value.trim());
-}
-
-/*
- * Sealed recording tokens.
- *
- * A recording link is written into a Zendesk ticket, where it is readable by
- * every agent, every ticket export, and every audit log, forever. Earlier
- * builds put `?authId=...&authToken=...` directly in that URL, which published
- * the account's API credentials to all of them.
- *
- * Instead the credentials are sealed into an opaque token with AES-256-GCM and
- * a short expiry. The ticket carries the token; only this backend can open it.
- *
- * Set RECORDING_TOKEN_SECRET so tokens stay valid across restarts. Without it a
- * random key is generated at boot and previously-issued links stop resolving.
- */
-const RECORDING_TOKEN_TTL_MS = Number(process.env.RECORDING_TOKEN_TTL_MS || 30 * 24 * 60 * 60 * 1000);
-const RECORDING_TOKEN_KEY = process.env.RECORDING_TOKEN_SECRET
-  ? crypto.createHash('sha256').update(process.env.RECORDING_TOKEN_SECRET).digest()
-  : crypto.randomBytes(32);
-
-if (!process.env.RECORDING_TOKEN_SECRET) {
-  console.warn('[VoBiz Backend] RECORDING_TOKEN_SECRET is not set - recording links will stop working after a restart.');
-}
-
-function sealRecordingToken(payload) {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', RECORDING_TOKEN_KEY, iv);
-  const body = Buffer.concat([
-    cipher.update(JSON.stringify({ ...payload, exp: Date.now() + RECORDING_TOKEN_TTL_MS }), 'utf8'),
-    cipher.final()
-  ]);
-  return Buffer.concat([iv, cipher.getAuthTag(), body]).toString('base64url');
-}
-
-function openRecordingToken(token) {
-  try {
-    const raw = Buffer.from(String(token), 'base64url');
-    if (raw.length < 29) return null;
-    const decipher = crypto.createDecipheriv('aes-256-gcm', RECORDING_TOKEN_KEY, raw.subarray(0, 12));
-    decipher.setAuthTag(raw.subarray(12, 28));
-    const payload = JSON.parse(
-      Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8')
-    );
-    if (!payload.exp || payload.exp < Date.now()) return null;
-    return payload;
-  } catch {
-    return null; // tampered, truncated, or sealed with a different key
-  }
-}
-
-// Load agents.json helper
-function getAgents() {
-  try {
-    const data = fs.readFileSync(path.join(__dirname, 'agents.json'), 'utf8');
-    return JSON.parse(data);
-  } catch (err) {
-    console.error('[VoBiz Backend] Error reading agents.json:', err);
-    return {};
-  }
-}
-
-// GET /agent/:agentId
-app.get('/agent/:agentId', (req, res) => {
-  const agents = getAgents();
-  let agent = agents[req.params.agentId];
-  if (!agent) {
-    // Dynamic fallback for custom extensions / usernames passed from softphone UI
-    const defaultAgent = agents['test-agent'] || {};
-    agent = {
-      sipUser: req.params.agentId.includes('agent') ? req.params.agentId : (defaultAgent.sipUser || 'agentjohn403814661276504964978078'),
-      sipPassword: defaultAgent.sipPassword || 'secret_password',
-      displayName: `Agent (${req.params.agentId})`
-    };
-  }
-  res.json(agent);
-});
-
-// GET /numbers
-app.get('/numbers', async (req, res) => {
-  const authId = req.query.authId || req.headers['x-auth-id'] || VOBIZ_AUTH_ID;
-  const authToken = req.query.authToken || req.headers['x-auth-token'] || VOBIZ_AUTH_TOKEN;
-
-  if (!authId || !authToken) {
-    return res.status(400).json({ error: 'Missing VoBiz credentials (authId, authToken)', numbers: [] });
-  }
-
-  try {
-    console.log(`[VoBiz Backend] Fetching phone numbers dynamically from VoBiz API for Auth ID: ${authId}`);
-    const vobizUrl = `https://api.vobiz.ai/api/v1/Account/${authId}/numbers?per_page=1000&limit=1000`;
-    const response = await fetch(vobizUrl, {
-      method: 'GET',
-      headers: {
-        'X-Auth-ID': authId,
-        'X-Auth-Token': authToken,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      let rawNumbers = data.items || data.numbers || data.objects || (Array.isArray(data) ? data : []);
-      let parsedNumbers = rawNumbers.map(n => typeof n === 'string' ? n : (n.e164 || n.number || n.phone_number || n.alias)).filter(Boolean);
-
-      // Remove duplicates while preserving order
-      parsedNumbers = Array.from(new Set(parsedNumbers));
-      cachedAccountNumbers = parsedNumbers;
-
-      return res.json({ numbers: parsedNumbers, source: 'vobiz_api', count: parsedNumbers.length });
-    } else {
-      console.warn(`[VoBiz Backend] Numbers API returned ${response.status}`);
-      const errData = await response.json().catch(() => ({}));
-      return res.status(response.status).json({ numbers: [], error: errData.error || 'Failed to fetch numbers from VoBiz API' });
-    }
-  } catch (err) {
-    console.error('[VoBiz Backend] Failed to fetch numbers from VoBiz API:', err.message);
-    return res.status(500).json({ numbers: [], error: err.message });
-  }
-});
-
-let cachedAccountNumbers = [];
-
-// POST /start-call
-app.post('/start-call', async (req, res) => {
-  const { to, agentId, authId, authToken, fromNumber } = req.body;
-  if (!to || !agentId) {
-    return res.status(400).json({ error: 'Missing required parameters: to, agentId' });
-  }
-
-  const agents = getAgents();
-  let agent = agents[agentId];
-  if (!agent) {
-    const defaultAgent = agents['test-agent'] || {};
-    agent = {
-      sipUser: agentId.includes('agent') ? agentId : (defaultAgent.sipUser || 'agentjohn403814661276504964978078'),
-      sipPassword: defaultAgent.sipPassword || 'secret_password',
-      displayName: `Agent (${agentId})`
-    };
-  }
-
-  const effectiveAuthId = authId || req.headers['x-auth-id'] || VOBIZ_AUTH_ID;
-  const effectiveAuthToken = authToken || req.headers['x-auth-token'] || VOBIZ_AUTH_TOKEN;
-  const effectiveFromNumber = fromNumber || VOBIZ_FROM_NUMBER;
-
-  if (!effectiveAuthId || !effectiveAuthToken || !effectiveFromNumber) {
-    console.error('[VoBiz Backend] Call start failed: missing authId, authToken, or fromNumber');
-    return res.status(400).json({ error: 'Missing required VoBiz credentials or Caller ID. Please authenticate via the Zendesk App.' });
-  }
-
-  // Attempt to read the public tunnel URL dynamically
-  let tunnelUrl = '';
-  try {
-    const tunnelUrlPath = path.join(__dirname, 'tunnel-url.txt');
-    if (fs.existsSync(tunnelUrlPath)) {
-      tunnelUrl = fs.readFileSync(tunnelUrlPath, 'utf8').trim();
-    }
-  } catch (e) {
-    console.warn('[VoBiz Backend] Could not read tunnel-url.txt, fallback to request headers:', e.message);
-  }
-
-  if (!tunnelUrl) {
-    tunnelUrl = `${req.protocol}://${req.get('host')}`;
-  }
-
-  console.log(`[VoBiz Backend] Call start triggered by Agent: "${agentId}" -> Customer: "${to}" | Outbound Caller ID: "${effectiveFromNumber}" (Auth ID: ${effectiveAuthId})`);
-  
-  // Format the answer URL to dial the agent next
-  const answerUrl = `${tunnelUrl}/call-answer?agentId=${encodeURIComponent(agentId)}&inboundNumber=${encodeURIComponent(req.body.inboundNumber || '')}&fromNumber=${encodeURIComponent(effectiveFromNumber || '')}`;
-  console.log(`[VoBiz Backend] Vobiz webhook Callback URL: ${answerUrl}`);
-
-  try {
-    const vobizUrl = `https://api.vobiz.ai/api/v1/Account/${effectiveAuthId}/Call/`;
-    const response = await fetch(vobizUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Auth-ID': effectiveAuthId,
-        'X-Auth-Token': effectiveAuthToken
-      },
-      body: JSON.stringify({
-        from: effectiveFromNumber,
-        to: to, // Dial customer first
-        answer_url: answerUrl,
-        record: 'true'
-      })
-    });
-
-    const result = await response.json();
-    console.log('[VoBiz Backend] Call API response from VoBiz:', result);
-    
-    if (!response.ok) {
-      return res.status(response.status).json(result);
-    }
-    
-    res.json(result);
-  } catch (error) {
-    console.error('[VoBiz Backend] Failed to initiate call:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-const handleCallAnswer = (req, res) => {
-  const agentId = req.query.agentId || req.body.agentId;
-  const inboundNumber = req.query.inboundNumber || req.body.inboundNumber;
-  const fromNumber = req.query.fromNumber || req.body.fromNumber;
-  const agents = getAgents();
-  const agent = agents[agentId];
-
-  let dialContent = '';
-  const isPstnNumber = isDialable(inboundNumber) && inboundNumber !== 'webrtc';
-  // If the numbers cache has never been warmed (e.g. straight after a restart)
-  // we cannot tell an account DID from an external number. Treating an account
-  // DID as external makes the platform dial its own inbound number, which
-  // loops. Route to the agent's endpoint instead, which is always safe.
-  const cacheWarm = cachedAccountNumbers.length > 0;
-  const isVirtualAccountDid = isPstnNumber && (!cacheWarm || cachedAccountNumbers.includes(inboundNumber));
-
-  if (isPstnNumber && !isVirtualAccountDid) {
-    console.log(`[VoBiz Webhook] Customer answered. Bridging to external PSTN phone: "${inboundNumber}"`);
-    dialContent = `<Number>${escapeXml(inboundNumber)}</Number>`;
-  } else {
-    const cleanSipUsername = ((agent && agent.sipUser) || 'agentjohn403814661276504964978078').replace(/^sip:/, '').split('@')[0];
-    if (isVirtualAccountDid) {
-      console.log(`[VoBiz Webhook] Inbound number "${inboundNumber}" is an Account Virtual DID. Automatically routing to WebRTC SIP User: "${cleanSipUsername}"`);
-    } else {
-      console.log(`[VoBiz Webhook] Customer answered. Bridging to WebRTC SIP User: "${cleanSipUsername}"`);
-    }
-    dialContent = `<User>${escapeXml(cleanSipUsername)}</User>`;
-  }
+function handleAnswer(req, res) {
+  const p = { ...req.query, ...req.body };
+  log(`WEBHOOK ${req.method} /answer`, JSON.stringify(p).slice(0, 300));
 
   res.set('Content-Type', 'text/xml');
-  // Only a dialable value may appear as the caller ID, and it is escaped even
-  // then - this string lands inside an XML attribute the platform executes.
-  const callerAttr = isDialable(fromNumber) ? ` callerId="${escapeXml(fromNumber.trim())}"` : '';
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Dial record="true" redirect="false"${callerAttr}>
-    ${dialContent}
-  </Dial>
-</Response>`.trim();
-  
-  res.send(xml);
-};
 
-app.get('/call-answer', handleCallAnswer);
-app.post('/call-answer', handleCallAnswer);
-
-// POST /hangup-call (REST Hangup trigger)
-app.post('/hangup-call', async (req, res) => {
-  const { callUuid, authId, authToken } = req.body;
-  const effectiveAuthId = authId || req.headers['x-auth-id'] || VOBIZ_AUTH_ID;
-  const effectiveAuthToken = authToken || req.headers['x-auth-token'] || VOBIZ_AUTH_TOKEN;
-
-  if (!callUuid) {
-    return res.json({ ok: true, message: 'SIP BYE handled client-side' });
+  // A Hangup notification is not a request for instructions. Returning <Dial>
+  // here hands Vobiz a fresh call leg after the call has already ended.
+  if ((p.Event || p.event) === 'Hangup') {
+    return res.send('<?xml version="1.0" encoding="UTF-8"?>\n<Response></Response>');
   }
 
-  try {
-    console.log(`[VoBiz Backend] Force hanging up call UUID: ${callUuid}`);
-    const vobizUrl = `https://api.vobiz.ai/api/v1/Account/${effectiveAuthId}/Call/${callUuid}/`;
-    const response = await fetch(vobizUrl, {
-      method: 'DELETE',
-      headers: {
-        'X-Auth-ID': effectiveAuthId,
-        'X-Auth-Token': effectiveAuthToken,
-        'Content-Type': 'application/json'
-      }
+  const callUuid = String(p.CallUUID || p.call_uuid || '');
+  const from = String(p.From || p.from || '');
+  const to = String(p.To || p.to || '');
+  const routeType = String(p.RouteType || p.routetype || '').toLowerCase();
+  const isFromBrowser = from.startsWith('sip:') || routeType === 'sip';
+
+  // action + redirect="false" are both required. Without them Vobiz re-fetches
+  // this URL when <Dial> ends and re-executes the whole document, so one call
+  // dials the customer over and over.
+  const dialStatusUrl = `${PUBLIC_BASE}/dial-status`;
+  const recordCallbackUrl = `${PUBLIC_BASE}/recording-ready`;
+
+  // Self-closing <Record> as a SIBLING BEFORE <Dial>, never nested inside it:
+  // FreeSWITCH rejects the nested form and the caller hears a bogus "Busy".
+  // recordSession="true" captures the bridged audio, and the file is attributed
+  // to this A-leg CallUUID.
+  const recordXml = `<Record fileFormat="mp3" recordSession="true" maxLength="3600" playBeep="false" redirect="false" callbackUrl="${recordCallbackUrl}" callbackMethod="POST"/>`;
+
+  if (isFromBrowser) {
+    // The browser dialled out. `To` is the customer's number.
+    const sipUser = (from.match(/^sip:([^@]+)@/) || [])[1] || SIP_USER;
+    const callerId = fromBySipUser.get(sipUser) || FROM_NUMBER;
+    const destination = to.replace(/[^\d+]/g, '');
+
+    rememberCall({
+      callUuid, direction: 'Outbound', agentSipUser: sipUser,
+      from: callerId, to: destination, startedAt: Date.now(),
     });
 
-    const result = await response.json().catch(() => ({ message: 'Call terminated' }));
-    // Report the real outcome. Returning ok:true on a failed hangup left the
-    // caller believing the call had ended while it was still up and billing.
-    if (!response.ok) {
-      console.warn(`[VoBiz Backend] Hangup rejected by VoBiz (${response.status}):`, result);
-      return res.status(response.status).json({ ok: false, error: 'Vobiz rejected the hangup', result });
-    }
-    return res.json({ ok: true, result });
+    log(`  -> browser is the A leg, dialling out to ${destination} as ${callerId}`);
+    return res.send(
+      `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  ${recordXml}\n` +
+      `  <Dial callerId="${callerId}" timeout="30" timeLimit="14400" action="${dialStatusUrl}" method="POST" redirect="false">\n` +
+      `    <Number>${destination}</Number>\n  </Dial>\n</Response>`
+    );
+  }
+
+  // A PSTN caller reached our DID. The only way to land that in the browser is
+  // <Dial><User>, which is currently blocked platform-side (ISSUES.md #1). The
+  // XML below is correct regardless, so inbound starts working the day Vobiz
+  // fixes its gateway URI — no change needed here.
+  //
+  // callerId must be a number this account owns. Omit it and Vobiz derives it
+  // from the A leg, which on an inbound call is the *caller's* number — not
+  // ours — so B-leg creation is refused silently and totally. Use the DID that
+  // was actually dialled, normalised to E.164.
+  const callerId = toE164(to) || FROM_NUMBER;
+  rememberCall({
+    callUuid, direction: 'Inbound', agentSipUser: SIP_USER,
+    from, to: callerId, startedAt: Date.now(),
+  });
+
+  log(`  -> inbound from ${from}, bridging to sip:${SIP_USER}@${REGISTRAR} callerId=${callerId}`);
+  return res.send(
+    `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  ${recordXml}\n` +
+    `  <Dial callerId="${callerId}" timeout="30" timeLimit="14400" action="${dialStatusUrl}" method="POST" redirect="false">\n` +
+    `    <User>sip:${SIP_USER}@${REGISTRAR}</User>\n  </Dial>\n</Response>`
+  );
+}
+
+// Inbound calls arrive at a different Vobiz application, but the handler is the
+// same — it already branches on direction.
+app.get('/answer', handleAnswer);
+app.post('/answer', handleAnswer);
+app.get('/inbound-answer', handleAnswer);
+app.post('/inbound-answer', handleAnswer);
+
+function toE164(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (s.startsWith('+')) return s;
+  if (s.startsWith('0') && s.length === 11) return `+91${s.slice(1)}`;
+  const digits = s.replace(/\D/g, '');
+  return digits ? `+${digits}` : '';
+}
+
+/**
+ * The `action` target of <Dial>. Reporting the result here is what stops the
+ * platform replaying the answer document.
+ *
+ * DialBLegUUID is the single most useful field in this whole stack: empty means
+ * no B leg was ever created, whatever the UI says.
+ */
+function handleDialStatus(req, res) {
+  const d = { ...req.query, ...req.body };
+  const bleg = d.DialBLegUUID || '';
+  log(`DIAL RESULT status=${d.DialStatus || '-'} ring=${d.DialRingStatus || '-'} cause=${d.DialHangupCause || '-'} bleg=${bleg || '(none — B leg never originated)'} dur=${d.DialBLegDuration || '-'}`);
+
+  const rec = callsByUuid.get(String(d.CallUUID || d.call_uuid || ''));
+  if (rec) {
+    rec.dialStatus = d.DialStatus;
+    rec.hangupCause = d.DialHangupCause;
+    rec.bLegUuid = bleg || null;
+    rec.duration = Number(d.DialBLegDuration || 0);
+    rec.endedAt = Date.now();
+  }
+
+  if (d.DialStatus === 'failed' && !bleg) {
+    log('  ⚠  failed with no B leg — the destination was unreachable, or the callerId is not owned by this account.');
+  }
+  res.status(200).end();
+}
+app.get('/dial-status', handleDialStatus);
+app.post('/dial-status', handleDialStatus);
+
+/**
+ * <Record callbackUrl>. Fires when the file is actually downloadable — this is
+ * the real signal, not a poll after the call ends.
+ */
+function handleRecordingReady(req, res) {
+  const d = { ...req.query, ...req.body };
+  const callUuid = String(d.CallUUID || d.call_uuid || '');
+  log(`RECORDING READY call=${callUuid} id=${d.RecordingID || d.RecordingId || '-'} reason=${d.RecordingEndReason || '-'}`);
+  const rec = callsByUuid.get(callUuid);
+  if (rec) {
+    rec.recordingId = d.RecordingID || d.RecordingId || d.recording_id || null;
+    rec.recordingDuration = Number(d.RecordingDuration || 0);
+  }
+  res.status(200).end();
+}
+app.get('/recording-ready', handleRecordingReady);
+app.post('/recording-ready', handleRecordingReady);
+
+// ══ Endpoints the browser calls ══════════════════════════════════════════════
+
+app.post('/login', async (req, res) => {
+  const { agentId, authId, authToken } = req.body || {};
+  if (!agentId || !authId || !authToken) {
+    return res.status(400).json({ error: 'agentId, authId and authToken are all required' });
+  }
+  // Accounts are not interchangeable. The SIP endpoint this backend bridges to
+  // and the caller ID it dials from both belong to one account, and Vobiz
+  // rejects a `from` number the account does not own. Name the mismatch rather
+  // than leaving the agent guessing which of several Auth IDs is the right one.
+  if (authId !== AUTH_ID || authToken !== AUTH_TOKEN) {
+    log(`login rejected — got ${authId}, this backend is bound to ${AUTH_ID}`);
+    return res.status(401).json({
+      error: `This backend is bound to account ${AUTH_ID}. You signed in as ${authId}, which does not own the SIP endpoint or the caller ID configured here.`,
+    });
+  }
+
+  // Numbers live at the lowercase /numbers path. /Number/ returns a bare 401
+  // that reads exactly like a credentials problem and is not one.
+  const r = await vobiz('GET', '/numbers?per_page=25');
+  if (r.status >= 400) {
+    log('login: numbers lookup failed', r.status);
+    return res.status(r.status).json({ error: `Vobiz returned ${r.status} fetching account numbers` });
+  }
+  const numbers = ((r.body && r.body.objects) || (r.body && r.body.items) || [])
+    .map(n => n.e164 || n.number || n.phone_number)
+    .filter(Boolean);
+  if (FROM_NUMBER && !numbers.includes(FROM_NUMBER)) numbers.unshift(FROM_NUMBER);
+
+  const token = newSession(agentId, authId, numbers, FROM_NUMBER);
+  if (SIP_USER) fromBySipUser.set(SIP_USER, FROM_NUMBER);
+  log(`login ok — ${agentId}, ${numbers.length} number(s)`);
+  res.json({ token, numbers, selected: FROM_NUMBER, authId });
+});
+
+app.get('/session', (req, res) => {
+  const s = getSession(req);
+  if (!s) return res.json({ loggedIn: false });
+  res.json({ loggedIn: true, agentId: s.agentId, authId: s.authId, numbers: s.numbers, from: s.from });
+});
+
+app.post('/logout', (req, res) => {
+  const header = req.headers.authorization || '';
+  if (header.startsWith('Bearer ')) sessions.delete(header.slice(7));
+  res.json({ ok: true });
+});
+
+app.post('/select-number', requireSession, (req, res) => {
+  const { number } = req.body || {};
+  const s = req.session;
+  if (!s.numbers.includes(number)) return res.status(400).json({ error: 'That number is not on this account' });
+  s.from = number;
+  if (SIP_USER) fromBySipUser.set(SIP_USER, number);
+  log(`caller ID for ${s.agentId} -> ${number}`);
+  res.json({ selected: number });
+});
+
+/**
+ * The SIP identity the panel registers as.
+ *
+ * Behind the session on purpose. The previous build served this unauthenticated
+ * AND invented an agent for any unknown id, so `GET /agent/anything` handed a
+ * live SIP password to anyone who knew the backend URL.
+ */
+app.get('/agent', requireSession, (req, res) => {
+  if (!SIP_USER || !SIP_PASSWORD) {
+    return res.status(500).json({ error: 'VOBIZ_SIP_USER / VOBIZ_SIP_PASSWORD are not configured on the backend' });
+  }
+  res.json({
+    displayName: `${req.session.agentId} (Vobiz)`,
+    sipUser: `${SIP_USER}@${REGISTRAR}`,
+    registrarUrl: `wss://${REGISTRAR}:5063/`,
+    sipPassword: SIP_PASSWORD,
+  });
+});
+
+app.get('/numbers', requireSession, (req, res) => {
+  res.json({ numbers: req.session.numbers, selected: req.session.from });
+});
+
+/**
+ * What the panel asks for after a call ends, to build the ticket log entry.
+ *
+ * Vobiz writes the CDR a few seconds after hangup and the recording callback
+ * lands later still, so the panel polls this briefly rather than expecting it
+ * to be complete the instant the session ends.
+ */
+app.get('/call-record', requireSession, (req, res) => {
+  const wanted = String(req.query.to || '').replace(/[^\d+]/g, '');
+  const rec = recentCalls.find(c => !wanted || String(c.to).replace(/[^\d+]/g, '').endsWith(wanted.slice(-10)));
+  if (!rec) return res.json({ found: false });
+  res.json({
+    found: true,
+    callUuid: rec.callUuid,
+    direction: rec.direction,
+    from: rec.from,
+    to: rec.to,
+    duration: rec.duration || 0,
+    dialStatus: rec.dialStatus || null,
+    bLegUuid: rec.bLegUuid || null,
+    recordingId: rec.recordingId || null,
+    recordingUrl: rec.recordingId ? signRecordingUrl(rec.recordingId) : null,
+  });
+});
+
+app.get('/recordings', requireSession, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit || 15), 50);
+  const r = await vobiz('GET', `/Recording/?limit=${limit}`);
+  const objects = ((r.body && r.body.objects) || []).map(o => ({
+    recording_id: o.recording_id,
+    add_time: o.add_time,
+    rounded_recording_duration: o.rounded_recording_duration,
+    call_uuid: o.call_uuid,
+    playUrl: signRecordingUrl(o.recording_id),
+  }));
+  res.json({ objects });
+});
+
+/**
+ * Playback. Signature-gated, not session-gated: an <audio> element cannot send
+ * an Authorization header, so the proof has to travel in the URL — but as a
+ * short-lived HMAC over this one recording id, never as account credentials.
+ */
+app.get('/recording-audio/:recordingId', async (req, res) => {
+  const { recordingId } = req.params;
+  if (!verifyRecordingSignature(recordingId, req.query.exp, req.query.sig)) {
+    return res.status(403).json({ error: 'This playback link is invalid or has expired. Reload the panel to get a fresh one.' });
+  }
+
+  const meta = await vobiz('GET', `/Recording/${encodeURIComponent(recordingId)}/`);
+  const src = meta.body && (meta.body.recording_url || meta.body.url);
+  if (!src) return res.status(404).json({ error: 'No audio is available for that recording yet.' });
+
+  try {
+    const audio = await fetch(src, { headers: { 'X-Auth-ID': AUTH_ID, 'X-Auth-Token': AUTH_TOKEN } });
+    if (!audio.ok) return res.status(audio.status).json({ error: `Vobiz returned ${audio.status} for that recording` });
+    res.set('Content-Type', audio.headers.get('content-type') || 'audio/mpeg');
+    res.set('Content-Disposition', 'inline; filename="recording.mp3"');
+    res.send(Buffer.from(await audio.arrayBuffer()));
   } catch (err) {
-    console.error('[VoBiz Backend] Hangup REST call failed:', err.message);
-    return res.status(502).json({ ok: false, error: err.message });
+    log('recording stream failed:', err.message);
+    res.status(502).json({ error: 'Could not stream that recording.' });
   }
 });
 
 /**
- * POST /sync-call
- * Option B: Talk Partner Edition (TPE) call ticket / voice comment sync, with Option A fallback.
+ * Bind this backend's /answer to the agent's SIP endpoint.
+ *
+ * Two undocumented things here, both from the README:
+ *  - POST /Endpoint/ REWRITES the username you submit, so the stored one must
+ *    be read back. We do not create endpoints — we only verify the configured
+ *    one exists, so a rewrite mismatch shows up as a clear error.
+ *  - POST /Endpoint/{id}/ ignores the documented `application` field and still
+ *    returns 202 "changed". The field that works is `app_id`.
  */
-app.post('/sync-call', async (req, res) => {
+app.post('/setup', requireSession, async (req, res) => {
+  if (!PUBLIC_BASE.startsWith('https://')) {
+    return res.status(500).json({ error: 'PUBLIC_BASE must be a public https URL that Vobiz can reach' });
+  }
+
+  const answerUrl = `${PUBLIC_BASE}/answer`;
+  const appsRes = await vobiz('GET', '/Application/?limit=50');
+  const existing = ((appsRes.body && appsRes.body.objects) || [])
+    .find(a => a.answer_url === answerUrl);
+
+  let appId = existing && (existing.app_id || existing.id);
+  if (!appId) {
+    const created = await vobiz('POST', '/Application/', {
+      app_name: 'Zendesk Calling (Vobiz)',
+      answer_url: answerUrl, answer_method: 'POST',
+      hangup_url: answerUrl, hangup_method: 'POST',
+    });
+    if (created.status >= 400) {
+      return res.status(created.status).json({ error: `Could not create the Vobiz application: ${JSON.stringify(created.body).slice(0, 200)}` });
+    }
+    appId = created.body && (created.body.app_id || created.body.id);
+  }
+  if (!appId) return res.status(502).json({ error: 'Vobiz did not return an app_id for the application' });
+
+  const epRes = await vobiz('GET', '/Endpoint/?limit=100');
+  const endpoint = ((epRes.body && epRes.body.objects) || []).find(e => e.username === SIP_USER);
+  if (!endpoint) {
+    return res.status(404).json({ error: `No SIP endpoint named "${SIP_USER}" on this account. Vobiz rewrites usernames on creation — check the stored username and update VOBIZ_SIP_USER.` });
+  }
+
+  // `app_id`, not `application` — the documented field is silently ignored.
+  const bind = await vobiz('POST', `/Endpoint/${encodeURIComponent(endpoint.endpoint_id || endpoint.id)}/`, { app_id: appId });
+  if (bind.status >= 400) {
+    return res.status(bind.status).json({ error: `Could not bind the endpoint to the application: ${JSON.stringify(bind.body).slice(0, 200)}` });
+  }
+
+  log(`setup ok — endpoint ${SIP_USER} bound to app ${appId} (${answerUrl})`);
+  res.json({ ok: true, appId, answerUrl, sipUser: SIP_USER, number: req.session.from });
+});
+
+// ══ Zendesk write-back ═══════════════════════════════════════════════════════
+
+app.post('/sync-call', requireSession, async (req, res) => {
   try {
     const {
-      subdomain = DEFAULT_ZENDESK_SUBDOMAIN,
-      email = DEFAULT_ZENDESK_EMAIL,
-      apiToken = DEFAULT_ZENDESK_API_TOKEN,
-      ticketId,
-      fromNumber,
-      toNumber,
-      duration,
-      recordingUrl,
-      callDirection,
-      notes,
-      requesterId
-    } = req.body;
+      subdomain = ZENDESK_SUBDOMAIN,
+      email = ZENDESK_EMAIL,
+      apiToken = ZENDESK_API_TOKEN,
+      ticketId, toNumber, duration, callDirection, notes, requesterId, callUuid,
+    } = req.body || {};
 
     if (!subdomain) {
-      return res.status(400).json({
-        error: 'Missing Zendesk subdomain. Provide subdomain in request payload or configure ZENDESK_SUBDOMAIN in backend .env'
-      });
+      return res.status(400).json({ error: 'No Zendesk subdomain. Set ZENDESK_SUBDOMAIN in the backend .env, or send it in the request.' });
     }
 
-    let effectiveRecordingUrl = recordingUrl || '';
-    const authId = req.body.authId || req.headers['x-auth-id'] || VOBIZ_AUTH_ID;
-    const authToken = req.body.authToken || req.headers['x-auth-token'] || VOBIZ_AUTH_TOKEN;
-    const callUuid = req.body.callUuid;
+    // The recording link is minted here, server-side, from the call ledger —
+    // never taken from the browser and never carrying account credentials.
+    const rec = callUuid ? callsByUuid.get(callUuid) : null;
+    const recordingUrl = rec && rec.recordingId ? signRecordingUrl(rec.recordingId) : '';
 
-    // Read public tunnel URL dynamically
-    let tunnelUrl = '';
-    try {
-      const tunnelUrlPath = path.join(__dirname, 'tunnel-url.txt');
-      if (fs.existsSync(tunnelUrlPath)) {
-        tunnelUrl = fs.readFileSync(tunnelUrlPath, 'utf8').trim();
-      }
-    } catch (e) {}
-    if (!tunnelUrl) tunnelUrl = `${req.protocol}://${req.get('host')}`;
-
-    if (callUuid && authId && authToken) {
-      // The resulting URL is written into a Zendesk ticket. Never put the
-      // account credentials in it - seal them into an expiring token instead.
-      const token = sealRecordingToken({ authId, authToken, callUuid });
-      effectiveRecordingUrl = `${tunnelUrl}/play-recording?token=${encodeURIComponent(token)}`;
-    } else if (!effectiveRecordingUrl && callUuid && authId) {
-      effectiveRecordingUrl = `https://api.vobiz.ai/api/v1/Account/${authId}/Recording/${callUuid}/`;
-    }
-
-    console.log(`[VoBiz Backend] Syncing call log for ticket: ${ticketId || 'NEW'}, Direction: ${callDirection}, Duration: ${duration}s, Recording: ${effectiveRecordingUrl || 'None'}`);
+    log(`sync-call ticket=${ticketId || 'NEW'} dir=${callDirection} dur=${duration}s recording=${recordingUrl ? 'yes' : 'none'}`);
 
     const result = await syncCallToZendesk({
-      subdomain,
-      email,
-      apiToken,
-      ticketId,
-      fromNumber: fromNumber || VOBIZ_FROM_NUMBER,
-      toNumber,
-      duration,
-      recordingUrl: effectiveRecordingUrl,
-      callDirection,
-      notes,
-      requesterId
+      subdomain, email, apiToken, ticketId,
+      fromNumber: (rec && rec.from) || req.session.from,
+      toNumber: toNumber || (rec && rec.to),
+      duration, recordingUrl, callDirection, notes, requesterId,
     });
-
     res.json(result);
-  } catch (error) {
-    console.error('[VoBiz Backend] Failed to sync call to Zendesk:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * GET /play-recording
- * Proxies call recording requests to VoBiz API with full authentication headers,
- * streaming the audio directly to the browser for zero-auth media playback.
- */
-app.get('/play-recording', async (req, res) => {
-  // Preferred: an opaque sealed token, as minted by /sync-call.
-  const sealed = req.query.token ? openRecordingToken(req.query.token) : null;
-  if (req.query.token && !sealed) {
-    return res.status(403).send('This recording link is invalid or has expired.');
-  }
-
-  const { authId, authToken, callUuid } = sealed || req.query;
-  const effectiveAuthId = authId || VOBIZ_AUTH_ID;
-  const effectiveAuthToken = authToken || VOBIZ_AUTH_TOKEN;
-
-  if (!effectiveAuthId || !effectiveAuthToken || !callUuid) {
-    return res.status(400).send('Missing required parameters: token, or callUuid with credentials.');
-  }
-
-  try {
-    console.log(`[VoBiz Recording Proxy] Fetching audio stream for Call UUID: ${callUuid} (Auth ID: ${effectiveAuthId})`);
-    
-    let targetAudioUrl = `https://api.vobiz.ai/api/v1/Account/${effectiveAuthId}/Recording/${callUuid}/`;
-    
-    let vobizRes = await fetch(targetAudioUrl, {
-      method: 'GET',
-      headers: {
-        'X-Auth-ID': effectiveAuthId,
-        'X-Auth-Token': effectiveAuthToken
-      }
-    });
-
-    if (!vobizRes.ok) {
-      const listUrl = `https://api.vobiz.ai/api/v1/Account/${effectiveAuthId}/Recording/?call_uuid=${callUuid}`;
-      const listRes = await fetch(listUrl, {
-        method: 'GET',
-        headers: {
-          'X-Auth-ID': effectiveAuthId,
-          'X-Auth-Token': effectiveAuthToken
-        }
-      });
-
-      if (listRes.ok) {
-        const listData = await listRes.json();
-        const items = listData.items || listData.objects || (Array.isArray(listData) ? listData : []);
-        if (items.length > 0) {
-          const recordingObj = items[0];
-          const directFileUrl = recordingObj.recording_url || recordingObj.url || recordingObj.file;
-          if (directFileUrl) {
-            vobizRes = await fetch(directFileUrl, {
-              method: 'GET',
-              headers: {
-                'X-Auth-ID': effectiveAuthId,
-                'X-Auth-Token': effectiveAuthToken
-              }
-            });
-          }
-        }
-      }
-    }
-
-    if (vobizRes.ok) {
-      const contentType = vobizRes.headers.get('content-type') || 'audio/mpeg';
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Content-Disposition', 'inline; filename="recording.mp3"');
-      
-      const buffer = await vobizRes.buffer();
-      return res.send(buffer);
-    } else {
-      const errText = await vobizRes.text().catch(() => '');
-      console.warn(`[VoBiz Recording Proxy] VoBiz API error (${vobizRes.status}):`, errText);
-      
-      res.setHeader('Content-Type', 'text/html');
-      // 404, not 200: an <audio> element or fetch must be able to tell that
-      // there is no media here rather than receiving a "successful" HTML page.
-      return res.status(404).send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <title>VoBiz Call Recording</title>
-          <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8f9fa; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-            .card { background: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); max-width: 460px; text-align: center; border: 1px solid #e2e8f0; }
-            .icon { font-size: 44px; margin-bottom: 12px; }
-            h2 { margin: 0 0 10px 0; color: #0f172a; font-size: 19px; font-weight: 600; }
-            p { margin: 0 0 18px 0; color: #64748b; font-size: 13.5px; line-height: 1.5; }
-            .badge { display: inline-block; background: #f1f5f9; color: #334155; padding: 6px 12px; border-radius: 6px; font-size: 11.5px; font-family: monospace; }
-          </style>
-        </head>
-        <body>
-          <div class="card">
-            <div class="icon">🎙️</div>
-            <h2>No Recording File Available</h2>
-            <p>This call was disconnected before an active conversation took place (Duration: 0s). VoBiz automatically creates recordings once a live call is connected for more than 5 seconds.</p>
-            <div class="badge">Call UUID: ${escapeHtml(callUuid)}</div>
-          </div>
-        </body>
-        </html>
-      `);
-    }
   } catch (err) {
-    console.error('[VoBiz Recording Proxy] Error streaming audio:', err);
-    return res.status(500).send(`Server error streaming recording: ${err.message}`);
+    log('sync-call failed:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-/**
- * POST /transcription-ready
- * Appends full VoBiz / Vapi conversation transcript to the Zendesk ticket as a private internal note.
- */
 app.post('/transcription-ready', async (req, res) => {
   try {
     const {
-      subdomain = DEFAULT_ZENDESK_SUBDOMAIN,
-      email = DEFAULT_ZENDESK_EMAIL,
-      apiToken = DEFAULT_ZENDESK_API_TOKEN,
-      ticketId,
-      transcript,
-      callId
-    } = req.body;
-
+      subdomain = ZENDESK_SUBDOMAIN, email = ZENDESK_EMAIL, apiToken = ZENDESK_API_TOKEN,
+      ticketId, transcript, callId,
+    } = req.body || {};
     if (!subdomain || !ticketId || !transcript) {
-      return res.status(400).json({
-        error: 'Missing required parameters: ticketId, transcript, subdomain'
-      });
+      return res.status(400).json({ error: 'subdomain, ticketId and transcript are all required' });
     }
-
-    console.log(`[VoBiz Backend] Received transcription-ready event for Zendesk ticket #${ticketId}`);
-
-    const result = await appendTranscription({
-      subdomain,
-      email,
-      apiToken,
-      ticketId,
-      transcript,
-      callId
-    });
-
-    res.json(result);
-  } catch (error) {
-    console.error('[VoBiz Backend] Failed to append transcription to Zendesk ticket:', error);
-    res.status(500).json({ error: error.message });
+    res.json(await appendTranscription({ subdomain, email, apiToken, ticketId, transcript, callId }));
+  } catch (err) {
+    log('transcription append failed:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
+app.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    account: AUTH_ID || null,
+    from: FROM_NUMBER || null,
+    sip: SIP_USER ? `sip:${SIP_USER}@${REGISTRAR}` : null,
+    publicBase: PUBLIC_BASE || null,
+    zendeskSubdomain: ZENDESK_SUBDOMAIN || null,
+    sessions: sessions.size,
+    recentCalls: recentCalls.length,
+  });
+});
+
+app.use((req, res) => {
+  log(`404 ${req.method} ${req.path}`);
+  res.status(404).json({ error: `No route for ${req.method} ${req.path}` });
+});
+
 app.listen(PORT, () => {
-  console.log(`[backend] listening on http://localhost:${PORT}`);
+  console.log(`Vobiz Zendesk calling backend on http://localhost:${PORT}`);
+  console.log(`  account     ${AUTH_ID || '(unset)'}`);
+  console.log(`  caller ID   ${FROM_NUMBER || '(unset)'}`);
+  console.log(`  registers   sip:${SIP_USER || '(unset)'}@${REGISTRAR}`);
+  console.log(`  public base ${PUBLIC_BASE || '(NOT SET — Vobiz cannot reach the answer URL, calls will die)'}`);
+  console.log(`  zendesk     ${ZENDESK_SUBDOMAIN || '(unset — ticket sync disabled)'}`);
 });

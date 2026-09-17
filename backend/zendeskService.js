@@ -1,7 +1,14 @@
-const fetch = require('node-fetch');
+/**
+ * Zendesk write-back.
+ *
+ * Every request here is an EXTERNAL API request — it originates on this server,
+ * not from the Apps framework — so Marketplace apps must identify themselves
+ * with the X-Zendesk-Marketplace-* headers. ZAF's own client.request() is
+ * exempt; this is not.
+ */
 
 /**
- * Creates Basic Auth header for Zendesk API calls using Email + API Token or User/Password
+ * Creates Basic Auth header for Zendesk API calls using Email + API Token
  */
 function getAuthHeader(email, apiToken) {
   if (email && apiToken) {
@@ -9,6 +16,23 @@ function getAuthHeader(email, apiToken) {
     return `Basic ${Buffer.from(credentials).toString('base64')}`;
   }
   return null;
+}
+
+/**
+ * Identification headers required of Marketplace apps on external API requests.
+ * Organization ID comes from the Organization page at apps.zendesk.com; App ID
+ * is assigned when the app is accepted and appears on its tile under Approved
+ * Apps. Both are blank until then, and omitted rather than sent empty.
+ */
+function marketplaceHeaders() {
+  const headers = {};
+  const name = process.env.ZENDESK_MARKETPLACE_NAME;
+  const orgId = process.env.ZENDESK_MARKETPLACE_ORG_ID;
+  const appId = process.env.ZENDESK_MARKETPLACE_APP_ID;
+  if (name) headers['X-Zendesk-Marketplace-Name'] = name;
+  if (orgId) headers['X-Zendesk-Marketplace-Organization-Id'] = orgId;
+  if (appId) headers['X-Zendesk-Marketplace-App-Id'] = appId;
+  return headers;
 }
 
 /**
@@ -33,7 +57,8 @@ async function syncCallToZendesk({
 
   const authHeader = getAuthHeader(email, apiToken);
   const headers = {
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    ...marketplaceHeaders()
   };
   if (authHeader) {
     headers['Authorization'] = authHeader;
@@ -202,7 +227,8 @@ async function appendTranscription({
 
   const authHeader = getAuthHeader(email, apiToken);
   const headers = {
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    ...marketplaceHeaders()
   };
   if (authHeader) {
     headers['Authorization'] = authHeader;

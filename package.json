@@ -1,7 +1,7 @@
 {
   "name": "vobiz-zendesk-calling",
-  "version": "1.0.0",
-  "description": "Vobiz calling app for Zendesk — browser softphone, screen pop, and call logging",
+  "version": "2.0.0",
+  "description": "Vobiz calling app for Zendesk \u2014 browser softphone, screen pop, and call logging",
   "private": true,
   "license": "MIT",
   "author": "Vobiz",
@@ -15,7 +15,8 @@
     "lint": "node scripts/lint.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
     "validate:app": "zcli apps:validate ./zendesk-app",
-    "tunnel": "cloudflared tunnel --url http://localhost:8092"
+    "tunnel": "cloudflared tunnel --url http://localhost:8092",
+    "bootstrap": "node backend/bootstrap.js"
   },
   "engines": {
     "node": ">=18"

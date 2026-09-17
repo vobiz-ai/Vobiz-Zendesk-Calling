@@ -1,14 +1,18 @@
 {
-  "name": "vobiz-crm-backend",
-  "version": "1.0.0",
-  "description": "Minimal backend to bridge calls for VoBiz CRM/Helpdesk integrations",
+  "name": "vobiz-zendesk-calling-backend",
+  "version": "2.0.0",
+  "description": "Calling backend for the Vobiz Zendesk CTI app. Holds the Vobiz account credentials, answers Vobiz webhooks, and writes calls back to Zendesk tickets.",
   "main": "server.js",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node --check server.js && node --check zendeskService.js"
   },
   "dependencies": {
     "dotenv": "^16.3.1",
-    "express": "^4.18.2",
-    "node-fetch": "^2.7.0"
+    "express": "^4.18.2"
   }
 }
