@@ -7,26 +7,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- Zendesk Apps Framework SDK -->
     <script src="https://assets.zendesk.com/apps/sdk/2.0/zaf_sdk.js"></script>
-    <!-- JsSIP WebRTC Client -->
-    <!-- JsSIP, vendored. Not a CDN: npm's jssip ships no browser bundle at
-         dist/jssip.min.js, so an exact-version CDN URL 404s and only the
-         floating @3 range resolves — which means the shipped app could change
-         behaviour under you with no commit here. A 404 leaves JsSIP undefined
-         and the panel frozen on "Registering…" with no error at all.
-           npm i jssip@3.10.1 && npx esbuild entry.js --bundle --minify \
-             --format=iife --global-name=JsSIP --outfile=assets/lib/jssip.min.js
-         where entry.js is: module.exports = require('jssip'); -->
+    <!-- JsSIP WebRTC Client (vendored locally) -->
     <script src="lib/jssip.min.js"></script>
     <!-- Custom Style -->
     <link rel="stylesheet" type="text/css" href="styles/style.css" />
   </head>
   <body>
     <div class="main">
-      <!--
-        Every style lives in style.css. The previous build carried inline
-        styles using Zendesk's own blue (#1f73b7), which no stylesheet could
-        override — which is why the panel never looked like Vobiz.
-      -->
       <header class="app-header">
         <div class="brand">
           <!-- The Vobiz logomark, from vobiz.ai/logo.svg. -->
@@ -39,184 +26,213 @@
             <span class="brand-product">Calling for Zendesk</span>
           </div>
         </div>
-        <div class="header-status-wrapper">
-          <span id="status" class="status-badge is-pending">Connecting</span>
-          <button id="settings-toggle-btn" title="Account settings" aria-label="Account settings" class="icon-btn">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-          </button>
-        </div>
+        <span id="status" class="status-badge is-pending">Connecting</span>
       </header>
 
       <!-- The full status sentence. Too long for the header badge, so it lives
            here where there is room to wrap and actually be read. -->
       <p id="status-message" class="status-message is-pending">Connecting…</p>
 
-      <!-- Login / Authentication View -->
-      <div id="login-view" class="view-panel is-hidden">
+      <!-- Incoming call popup banner. Sits above the panel rather than inside a step,
+           because it has to be the first thing seen when a call arrives. -->
+      <div id="incoming" class="incoming" hidden>
+        <p class="incoming-label">Incoming call</p>
+        <p id="incoming-from" class="incoming-from">—</p>
+        <div class="incoming-actions">
+          <button id="acceptbtn" class="btn btn-accept" type="button">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>
+            </svg>
+            Accept
+          </button>
+          <button id="declinebtn" class="btn btn-hangup" type="button">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67"/>
+              <path d="M5 5l14 14"/>
+            </svg>
+            Decline
+          </button>
+        </div>
+        <p class="incoming-hint">Enter to accept, Escape to decline</p>
+      </div>
+
+      <div class="panel">
+        <!-- Step 1 — sign in -->
         <section class="step">
           <div class="step-head">
             <span class="step-num">1</span>
             <h2 class="step-title">Sign in to Vobiz</h2>
           </div>
-          <p class="step-help">
-            Your Auth ID and Auth Token are on the
-            <a href="https://console.vobiz.ai" target="_blank" rel="noopener">Console dashboard</a>,
-            under <strong>API credentials</strong>. The Auth Token is not your login password.
-          </p>
-
-          <div class="form-group">
-            <label class="field-label" for="auth-id-input">Auth ID</label>
-            <input type="text" id="auth-id-input" class="input input-mono" placeholder="MA_XXXXXXXX" autocomplete="off" />
+          <div class="tabs" role="tablist" aria-label="How to sign in">
+            <button type="button" id="mode-account-tab" class="tab is-active" role="tab" aria-selected="true" aria-controls="mode-account">
+              Vobiz account
+            </button>
+            <button type="button" id="mode-sip-tab" class="tab" role="tab" aria-selected="false" aria-controls="mode-sip">
+              SIP direct
+            </button>
           </div>
 
-          <div class="form-group">
-            <label class="field-label" for="auth-token-input">Auth Token</label>
-            <input type="password" id="auth-token-input" class="input" placeholder="Your Vobiz Auth Token" autocomplete="off" />
-          </div>
+          <!-- Signing in with the account. The backend holds the SIP identity. -->
+          <div id="mode-account" role="tabpanel" aria-labelledby="mode-account-tab">
+            <p class="step-help">
+              Your Auth ID and Auth Token are on the
+              <a href="https://console.vobiz.ai" target="_blank" rel="noopener">Console dashboard</a>,
+              under <strong>API credentials</strong>. The Auth Token is not your login password.
+            </p>
 
-          <div class="form-group">
-            <label class="field-label" for="inbound-number-select-login">Inbound receiving number</label>
-            <select id="inbound-number-select-login" class="input">
-              <option value="">Select receiving number…</option>
-            </select>
-          </div>
+            <div id="vobiz-login-form">
+              <div class="form-group">
+                <label class="field-label" for="vobiz-auth-id">Auth ID</label>
+                <input type="text" id="vobiz-auth-id" class="input input-mono" placeholder="MA_XXXXXXXX" autocomplete="off" />
+              </div>
 
-          <button id="auth-save-btn" class="btn btn-primary">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
-              <path d="m10 17 5-5-5-5M15 12H3"/>
-            </svg>
-            Authenticate &amp; save
-          </button>
-          <p id="vobiz-login-status" class="hint"></p>
-          <p class="hint">Your Auth Token is sent to your calling backend once and exchanged for a session. It is never stored in this browser.</p>
-        </section>
-      </div>
+              <div class="form-group">
+                <label class="field-label" for="vobiz-auth-token">Auth Token</label>
+                <input type="password" id="vobiz-auth-token" class="input" placeholder="Your Vobiz Auth Token" autocomplete="off" />
+              </div>
 
-      <!-- Dialer View -->
-      <div id="dialer-view" class="view-panel">
-        <section class="step">
-          <div class="step-head">
-            <span class="step-num">1</span>
-            <h2 class="step-title">Choose your numbers</h2>
-          </div>
-          <p class="step-help">
-            Calls go out from the caller ID, and arrive on the receiving number.
-            Carriers require a real number to bridge a call to a mobile.
-          </p>
-          <div class="number-selectors-container">
-            <div class="form-group">
-              <label class="field-label" for="from-number-select">Calling from</label>
-              <select id="from-number-select" class="input input-sm">
-                <option value="">Select caller ID…</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="field-label" for="inbound-number-select">Receiving on</label>
-              <select id="inbound-number-select" class="input input-sm">
-                <option value="">Select receiving number…</option>
-              </select>
+              <button id="vobiz-login-btn" class="btn btn-primary">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+                  <path d="m10 17 5-5-5-5M15 12H3"/>
+                </svg>
+                Log in
+              </button>
             </div>
           </div>
+
+          <!-- Signing in as one endpoint. Nothing account-wide is needed, and the
+               backend never sees or hands out these credentials. -->
+          <div id="mode-sip" role="tabpanel" aria-labelledby="mode-sip-tab" hidden>
+            <p class="step-help">
+              The endpoint's own SIP credentials, from
+              <a href="https://console.vobiz.ai" target="_blank" rel="noopener">Console</a> &rarr;
+              Voice &rarr; Endpoints. Signs in as that one endpoint, without
+              account-wide credentials.
+            </p>
+
+            <div class="form-group">
+              <label class="field-label" for="sip-username">SIP username</label>
+              <input type="text" id="sip-username" class="input input-mono" placeholder="playXXXXXXXXXXXX" autocomplete="off" />
+            </div>
+
+            <div class="form-group">
+              <label class="field-label" for="sip-password">SIP password</label>
+              <input type="password" id="sip-password" class="input" placeholder="Endpoint password" autocomplete="off" />
+            </div>
+
+            <div class="form-group">
+              <label class="field-label" for="sip-caller-id">Calling from</label>
+              <input type="tel" id="sip-caller-id" class="input input-mono" placeholder="+91XXXXXXXXXX" autocomplete="off" />
+              <p class="hint">
+                The number outgoing calls show. Carriers reject a call without a
+                real one, so this is required to dial out.
+              </p>
+            </div>
+
+            <label class="check-row" for="sip-remember">
+              <input type="checkbox" id="sip-remember" />
+              <span class="check-text">
+                Remember these
+                <span class="check-note">Kept in this browser, on this machine. Leave off on a shared computer.</span>
+              </span>
+            </label>
+
+            <button id="sip-connect-btn" class="btn btn-primary">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+                <path d="m10 17 5-5-5-5M15 12H3"/>
+              </svg>
+              Connect
+            </button>
+          </div>
+
+          <p id="vobiz-login-status" class="hint">Not signed in.</p>
         </section>
 
-        <section class="step">
+        <!-- Step 2 — caller ID. Account mode only: picking from the account's
+             numbers needs account credentials. SIP direct types one instead. -->
+        <section class="step" id="step-caller-id">
           <div class="step-head">
             <span class="step-num">2</span>
+            <h2 class="step-title">Choose a caller ID</h2>
+          </div>
+          <p class="step-help">
+            The Vobiz number your calls go out from. Carriers require a real
+            number here to bridge a call to a mobile or landline.
+          </p>
+          <div class="form-group">
+            <label class="field-label" for="vobiz-number-select" id="vobiz-number-label" hidden>Calling from</label>
+            <select id="vobiz-number-select" hidden class="input"></select>
+          </div>
+        </section>
+
+        <!-- Step 3 — dial -->
+        <section class="step">
+          <div class="step-head">
+            <span class="step-num">3</span>
             <h2 class="step-title">Place a call</h2>
           </div>
           <p class="step-help">
-            Type a number in E.164 format, or click any phone number in Zendesk
-            and this panel dials it for you.
+            Type a number in E.164 format, or click any phone number in
+            Zendesk and this panel dials it for you.
           </p>
 
-          <div class="form-group">
-            <label class="field-label" for="dialnumber">Number to call</label>
-            <input type="tel" id="dialnumber" class="input input-mono input-dial" placeholder="+91 98765 43210" />
-          </div>
-
-          <div class="dialpad">
-            <button type="button" class="dial-key" onclick="pressKey('1')">1</button>
-            <button type="button" class="dial-key" onclick="pressKey('2')">2</button>
-            <button type="button" class="dial-key" onclick="pressKey('3')">3</button>
-            <button type="button" class="dial-key" onclick="pressKey('4')">4</button>
-            <button type="button" class="dial-key" onclick="pressKey('5')">5</button>
-            <button type="button" class="dial-key" onclick="pressKey('6')">6</button>
-            <button type="button" class="dial-key" onclick="pressKey('7')">7</button>
-            <button type="button" class="dial-key" onclick="pressKey('8')">8</button>
-            <button type="button" class="dial-key" onclick="pressKey('9')">9</button>
-            <button type="button" class="dial-key" onclick="pressKey('*')">&lowast;</button>
-            <button type="button" class="dial-key" onclick="pressKey('0')">0</button>
-            <button type="button" class="dial-key" onclick="pressKey('#')">#</button>
-          </div>
-
-          <div class="actions">
-            <button id="dialbtn" class="btn btn-primary">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>
-              </svg>
-              Call
-            </button>
+          <div id="dialbox">
+            <div class="form-group">
+              <label class="field-label" for="dialnumber">Number to call</label>
+              <input type="tel" id="dialnumber" class="input input-mono input-dial" placeholder="+91 98765 43210" />
+            </div>
+            <div class="actions">
+              <button id="dialbtn" class="btn btn-primary" disabled>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>
+                </svg>
+                Call
+              </button>
+              <button id="hangupbtn" hidden class="btn btn-hangup">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67"/>
+                  <path d="M5 5l14 14"/>
+                </svg>
+                Hang up
+              </button>
+            </div>
           </div>
           <p id="dial-hint" class="hint"></p>
+          <p id="callnum" hidden class="call-status"></p>
+        </section>
+
+        <audio id="vobiz-remote-audio" autoplay></audio>
+
+        <!-- Optional — inbound -->
+        <section class="step step-optional">
+          <div class="step-head">
+            <span class="step-num step-num-optional">+</span>
+            <h2 class="step-title">Receive calls here</h2>
+          </div>
+          <p class="step-help">
+            One-time setup. Points your selected Vobiz number at this panel so
+            inbound calls ring in the browser.
+          </p>
+          <button id="setup-inbound-btn" class="btn btn-secondary">Enable inbound calls</button>
+          <p id="inbound-setup-status" class="hint"></p>
         </section>
       </div>
 
-      <!-- Active Call / Inbound Ringing View -->
-      <div id="call-view" class="view-panel is-hidden">
-        <div class="call-card">
-          <div class="call-animation">
-            <span class="pulse-ring"></span>
-            <div class="caller-icon">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                <circle cx="12" cy="7" r="4"/>
-              </svg>
-            </div>
-          </div>
-          <h4 id="caller-name">Unknown caller</h4>
-          <p id="caller-phone"></p>
-          <p id="call-state-text" class="call-ringing">Ringing</p>
-          <h2 id="call-timer" class="is-hidden">00:00</h2>
-        </div>
-
-        <!-- Contact Profile Link -->
-        <div id="contact-info" class="contact-card is-hidden">
-          <div class="contact-details">
-            <span class="contact-label">Zendesk user</span>
-            <span id="zd-user-name" class="contact-name"></span>
-          </div>
-          <button id="view-profile-btn" class="view-profile-btn">View profile</button>
-        </div>
-
-        <!-- Post-call logging -->
-        <div id="call-log-section" class="log-card is-hidden">
-          <div id="recording-preview-box" class="notice notice-success">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4"/>
+      <div id="call-history">
+        <div class="section-title">
+          <span>Call recordings</span>
+          <button id="refresh-history-btn" class="icon-btn" title="Refresh" aria-label="Refresh recordings">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+              <path d="M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+              <path d="M8 16H3v5"/>
             </svg>
-            <span>Recording on. Audio attaches to the ticket automatically.</span>
-          </div>
-          <div class="form-group">
-            <label for="call-notes" class="field-label">Call notes</label>
-            <textarea id="call-notes" class="input log-notes" placeholder="What did you discuss?"></textarea>
-          </div>
-          <button id="logbtn" class="btn btn-secondary">Save call log</button>
-        </div>
-
-        <div class="actions">
-          <button id="hangupbtn" class="btn btn-hangup">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67"/>
-              <path d="M5 5l14 14"/>
-            </svg>
-            Hang up
           </button>
         </div>
+        <ul id="call-history-list"></ul>
+        <audio id="vobiz-playback-audio" controls hidden></audio>
       </div>
 
       <!-- Explanation, kept at the bottom so it never gets in the way. -->
@@ -239,11 +255,11 @@
         </div>
 
         <div class="faq-item">
-          <h3>Which ticket does a call get logged to?</h3>
+          <h3>Why is the Call button disabled?</h3>
           <p>
-            The ticket you are viewing when the call ends. If you started the
-            call by clicking a number on a ticket, that ticket is used. With no
-            ticket open, a new one is created.
+            Calling needs both a signed-in account and a live SIP registration.
+            The hint under the button says which one is missing. Dialling
+            without registration would connect the customer to silence.
           </p>
         </div>
 
@@ -257,20 +273,18 @@
         </div>
 
         <div class="faq-item">
-          <h3>Is my Auth Token stored anywhere?</h3>
+          <h3>Where do recordings go?</h3>
           <p>
-            Not by this app. It is held in your browser session and sent to your
-            own calling backend on each request. Recording links written into
-            tickets carry an expiring token, never your credentials.
+            Vobiz records the call and this panel lists recent ones above.
+            Calls are also logged to tickets in Zendesk. Playback is proxied
+            through your calling backend, because recording files need
+            authentication a plain audio tag cannot send.
           </p>
         </div>
       </details>
-
-      <!-- Audio Element for WebRTC audio -->
-      <audio id="vobiz-remote-audio" autoplay></audio>
     </div>
 
     <!-- CTI App Logic -->
-    <script src="scripts/app.js"></script>
+    <script defer src="scripts/app.js"></script>
   </body>
 </html>

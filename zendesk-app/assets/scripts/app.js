@@ -1,18 +1,11 @@
-/** === Vobiz Calling — Zendesk Support CTI app (top_bar) ===
+/** === Vobiz Calling — Zendesk Support CTI app ===
  *
  * A softphone that lives in the Zendesk top bar. It stays registered over SIP
  * while the panel is open, dials when the agent clicks Call or clicks a phone
- * number in Zendesk, and writes the result back to a ticket.
+ * number in Zendesk, logs calls to tickets, and displays recent recordings.
  *
  * THE BROWSER IS THE A LEG. This panel sends the SIP INVITE itself and the
- * backend answers with <Dial><Number>. The reverse — backend originates to the
- * customer, then bridges this browser in with <Dial><User> — is what the
- * previous build did, and it cannot work: routing *into* a registered WebRTC
- * endpoint is blocked platform-side. See ISSUES.md.
- *
- * This app holds no Vobiz credentials. The agent's Auth ID/Token are POSTed to
- * the backend once at login, exchanged for an opaque session token, and never
- * stored in the browser.
+ * backend answers with <Dial><Number>.
  */
 
 const REGISTRAR_HOST = "registrar.vobiz.ai";
@@ -28,9 +21,7 @@ let vobizUA = null;
 let currentRTCSession = null;
 let agentIdentity = null;
 
-// Calling needs BOTH an account session (whose number, whose balance) and a
-// live SIP registration (where the audio lands). Gating on one alone lets an
-// agent dial while the other is down, which rings the customer into silence.
+// Calling requires BOTH an account session and a live SIP registration.
 let accountReady = false;
 let sipRegistered = false;
 
@@ -46,44 +37,27 @@ let lastCallRecord = null;
 
 /**
  * Every backend call goes through here.
- *
- * The Bearer token is the whole auth story: the backend issues it at login and
- * nothing else the browser holds can be replayed against Vobiz.
- *
- * ngrok's free tier serves a browser interstitial to anything with a browser
- * User-Agent, so a plain fetch() gets an HTML warning page instead of JSON.
- * The header suppresses it and is inert against any other host.
+ * The ngrok-skip-browser-warning header suppresses the free-tier interstitial.
  */
 async function backendFetch(pathname, options = {}) {
+  const url = pathname.startsWith("http") ? pathname : `${backendUrl}${pathname}`;
   const headers = {
     "ngrok-skip-browser-warning": "1",
     ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
     ...(options.headers || {}),
   };
-  // No fallback to a different host, ever. The previous build retried against a
-  // hardcoded tunnel hostname, which hands the operator's credentials to
-  // whoever owns that hostname once the quick tunnel expires.
-  return fetch(`${backendUrl}${pathname}`, { ...options, headers });
+  return fetch(url, { ...options, headers });
 }
 
 async function backendJson(pathname, options) {
   const res = await backendFetch(pathname, options);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `${options && options.method || "GET"} ${pathname} failed (${res.status})`);
+  if (!res.ok) {
+    throw new Error(data.error || `${(options && options.method) || "GET"} ${pathname} failed (${res.status})`);
+  }
   return data;
 }
 
-/**
- * ZAF hands settings back as a flat object. zcli's local app.json expresses the
- * same thing as an ARRAY of single-key objects:
- *
- *   [{ title: "…" }, { backend_url: "…" }, { agent_id: "…" }]
- *
- * That normally gets normalised before it reaches us, but when it does not the
- * only symptom is the panel reading "Not configured" with correct settings
- * plainly visible in zcli — which sends you looking in entirely the wrong
- * place. Accept both shapes.
- */
 function normaliseSettings(raw) {
   if (!raw) return {};
   if (!Array.isArray(raw)) return raw;
@@ -120,293 +94,439 @@ async function init() {
   }
 
   if (!backendUrl || !agentId) {
-    setStatus("Not configured — set the Backend URL and Agent Identity in this app's settings.");
-    showView("login");
+    setStatus("Not configured — set the Backend URL and Agent Identity in this app's settings.", "error");
     return;
   }
-  // A bare hostname resolves relative to the app origin and 404s silently,
-  // which reads as "the backend is down" rather than a typo. localhost is the
-  // one exemption: browsers already treat it as a secure context.
+
   const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(backendUrl);
   if (!/^https:\/\//i.test(backendUrl) && !isLocal) {
-    setStatus("Backend URL must start with https:// — check this app's settings.");
-    showView("login");
+    setStatus("Backend URL must start with https:// — check this app's settings.", "error");
     return;
   }
 
   wireUi();
 
-  if (inZendesk) client.on("cti.triggerDialer", onTriggerDialer);
+  if (inZendesk) {
+    client.on("cti.triggerDialer", onTriggerDialer);
+    client.on("voice.dialout", onTriggerDialer);
+  }
 
-  // Leave the registrar cleanly. Without this the binding lingers until it
-  // expires (JsSIP defaults to 600s) and inbound routes to a dead leg for up
-  // to ten minutes after the agent closes the tab.
+  // Leave registrar cleanly on window close/refresh
   window.addEventListener("beforeunload", () => {
-    try { if (vobizUA) vobizUA.stop(); } catch { /* nothing useful on the way out */ }
+    try { if (vobizUA) vobizUA.stop(); } catch { /* ignore */ }
   });
 
-  await restoreSession();
+  restoreAuthMode();
+  if (authMode !== "sip") {
+    await restoreVobizSession();
+  }
 }
 
 function wireUi() {
-  document.getElementById("dialbtn").addEventListener("click", onDialButtonClick);
-  document.getElementById("hangupbtn").addEventListener("click", onHangupButtonClick);
-  document.getElementById("logbtn").addEventListener("click", onLogButtonClick);
-  document.getElementById("auth-save-btn").addEventListener("click", onLoginClick);
+  const loginBtn = document.getElementById("vobiz-login-btn");
+  if (loginBtn) loginBtn.addEventListener("click", vobizLogin);
 
-  const settingsBtn = document.getElementById("settings-toggle-btn");
-  if (settingsBtn) {
-    settingsBtn.addEventListener("click", () => {
-      const loginVisible = !document.getElementById("login-view").classList.contains("is-hidden");
-      showView(loginVisible && accountReady ? "dialer" : "login");
-    });
-  }
+  const modeAccountTab = document.getElementById("mode-account-tab");
+  if (modeAccountTab) modeAccountTab.addEventListener("click", () => setAuthMode("account"));
 
-  const fromSelect = document.getElementById("from-number-select");
-  if (fromSelect) fromSelect.addEventListener("change", onSelectNumber);
+  const modeSipTab = document.getElementById("mode-sip-tab");
+  if (modeSipTab) modeSipTab.addEventListener("click", () => setAuthMode("sip"));
+
+  const sipConnectBtn = document.getElementById("sip-connect-btn");
+  if (sipConnectBtn) sipConnectBtn.addEventListener("click", sipDirectConnect);
+
+  const acceptBtn = document.getElementById("acceptbtn");
+  if (acceptBtn) acceptBtn.addEventListener("click", acceptCall);
+
+  const declineBtn = document.getElementById("declinebtn");
+  if (declineBtn) declineBtn.addEventListener("click", declineCall);
+
+  document.addEventListener("keydown", e => {
+    if (!incomingPending) return;
+    if (e.key === "Enter") {
+      e.preventDefault();
+      acceptCall();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      declineCall();
+    }
+  });
+
+  const numSelect = document.getElementById("vobiz-number-select");
+  if (numSelect) numSelect.addEventListener("change", vobizSelectNumber);
+
+  const dialBtn = document.getElementById("dialbtn");
+  if (dialBtn) dialBtn.addEventListener("click", onDialButtonClick);
+
+  const hangupBtn = document.getElementById("hangupbtn");
+  if (hangupBtn) hangupBtn.addEventListener("click", hangUp);
+
+  const setupInboundBtn = document.getElementById("setup-inbound-btn");
+  if (setupInboundBtn) setupInboundBtn.addEventListener("click", setupInboundCalling);
+
+  const refreshHistoryBtn = document.getElementById("refresh-history-btn");
+  if (refreshHistoryBtn) refreshHistoryBtn.addEventListener("click", loadCallHistory);
 
   const dialInput = document.getElementById("dialnumber");
   if (dialInput) {
-    dialInput.addEventListener("keydown", e => { if (e.key === "Enter") onDialButtonClick(); });
+    dialInput.addEventListener("keydown", e => {
+      if (e.key === "Enter") onDialButtonClick();
+    });
   }
 }
 
-/**
- * Session restore.
- *
- * sessionStorage, not localStorage, and only the opaque backend token — never
- * the Vobiz Auth Token. It dies with the tab, which is the right lifetime for
- * something that authorises placing billable calls.
- */
-async function restoreSession() {
-  sessionToken = sessionStorage.getItem("vobiz_session_token") || "";
-  if (!sessionToken) {
-    showView("login");
-    setStatus("Sign in to start calling");
+// ─── auth mode & SIP direct ──────────────────────────────────────────────────
+
+const AUTH_MODE_KEY = "vobiz.authMode";
+const SIP_CREDS_KEY = "vobiz.sipDirect";
+let authMode = "account";
+
+function readStore(key) {
+  try { return JSON.parse(localStorage.getItem(key) || "null"); } catch { return null; }
+}
+
+function writeStore(key, value) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
+  } catch { /* ignore */ }
+}
+
+function setAuthMode(mode) {
+  authMode = mode === "sip" ? "sip" : "account";
+  writeStore(AUTH_MODE_KEY, authMode);
+
+  const isSip = authMode === "sip";
+  const show = (id, visible) => {
+    const el = document.getElementById(id);
+    if (el) el.hidden = !visible;
+  };
+  show("mode-account", !isSip);
+  show("mode-sip", isSip);
+  show("step-caller-id", !isSip);
+
+  const tab = (id, active) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle("is-active", active);
+    el.setAttribute("aria-selected", String(active));
+  };
+  tab("mode-account-tab", !isSip);
+  tab("mode-sip-tab", isSip);
+}
+
+function sipDirectCallerId() {
+  const el = document.getElementById("sip-caller-id");
+  return el ? el.value.trim() : "";
+}
+
+async function sipDirectConnect() {
+  const username = (document.getElementById("sip-username") || {}).value?.trim() || "";
+  const password = (document.getElementById("sip-password") || {}).value || "";
+  const callerId = sipDirectCallerId();
+  const remember = Boolean((document.getElementById("sip-remember") || {}).checked);
+
+  if (!username || !password) {
+    setLoginStatus("Enter the endpoint's SIP username and password.");
     return;
   }
+  if (!callerId) {
+    setLoginStatus("Enter the number to call from — carriers reject a call without one.");
+    return;
+  }
+
+  writeStore(SIP_CREDS_KEY, remember ? { username, password, callerId } : null);
+
+  const cleanUsername = username.includes("@") ? username.split("@")[0] : username;
+  const sipUser = `${cleanUsername}@${REGISTRAR_HOST}`;
+  setLoginStatus(`Signing in as ${cleanUsername}…`);
+
   try {
-    const session = await backendJson("/session");
-    if (!session.loggedIn) throw new Error("expired");
-    await onLoggedIn(session.numbers, session.from, session.authId);
-  } catch {
-    sessionStorage.removeItem("vobiz_session_token");
-    sessionToken = "";
-    showView("login");
-    setStatus("Sign in to start calling");
+    await backendJson("/login-sip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sipUser: cleanUsername, callerId }),
+    });
+  } catch (err) {
+    console.warn("[Vobiz] Backend /login-sip registration note:", err.message);
+  }
+
+  setDialEnabled(true);
+  startSipUA(sipUser, password, cleanUsername);
+}
+
+function restoreAuthMode() {
+  setAuthMode(readStore(AUTH_MODE_KEY) || "account");
+  if (authMode !== "sip") return;
+
+  const saved = readStore(SIP_CREDS_KEY);
+  if (!saved || !saved.username) return;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ""; };
+  set("sip-username", saved.username);
+  set("sip-password", saved.password);
+  set("sip-caller-id", saved.callerId);
+  const box = document.getElementById("sip-remember");
+  if (box) box.checked = true;
+  if (saved.password && saved.callerId) {
+    sipDirectConnect();
   }
 }
 
-async function onLoginClick() {
-  const authId = document.getElementById("auth-id-input").value.trim();
-  const authToken = document.getElementById("auth-token-input").value.trim();
+// ─── session & auth ──────────────────────────────────────────────────────────
+
+async function restoreVobizSession() {
+  sessionToken = sessionStorage.getItem("vobiz_session_token") || "";
+  try {
+    const res = await backendFetch(`/session/${encodeURIComponent(agentId)}`);
+    const session = await res.json().catch(() => ({}));
+    if (session.loggedIn) {
+      try { await backendJson("/setup", { method: "POST" }); } catch (e) { console.warn("[Vobiz] setup note:", e); }
+      renderNumberOptions(session.numbers, session.from);
+      setLoginStatus(`Logged in as ${session.authId} — calling from ${session.from}`);
+      setDialEnabled(true);
+      loadCallHistory();
+      initVobizSip();
+    } else {
+      setDialEnabled(false);
+      initVobizSip();
+    }
+  } catch (err) {
+    console.warn("[Vobiz] Could not check login session:", err);
+    initVobizSip();
+  }
+}
+
+async function vobizLogin() {
+  const authIdInput = document.getElementById("vobiz-auth-id");
+  const authTokenInput = document.getElementById("vobiz-auth-token");
+  const authId = authIdInput ? authIdInput.value.trim() : "";
+  const authToken = authTokenInput ? authTokenInput.value.trim() : "";
+
   if (!authId || !authToken) {
     setLoginStatus("Enter both an Auth ID and an Auth Token.");
     return;
   }
-  setLoginStatus("Signing in…");
+
+  setLoginStatus("Logging in…");
   try {
     const data = await backendJson("/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agentId, authId, authToken }),
     });
+
     sessionToken = data.token;
     sessionStorage.setItem("vobiz_session_token", sessionToken);
-    // The token the agent typed is deliberately not kept anywhere. Clear the
-    // field so it does not sit in the DOM either.
-    document.getElementById("auth-token-input").value = "";
-    await onLoggedIn(data.numbers, data.selected, data.authId);
+
+    try { await backendJson("/setup", { method: "POST" }); } catch (e) { console.warn("[Vobiz] setup note:", e); }
+    renderNumberOptions(data.numbers, data.selected);
+    setLoginStatus(`Logged in as ${authId} — calling from ${data.selected}`);
+    setDialEnabled(true);
+    loadCallHistory();
+    initVobizSip();
   } catch (err) {
-    console.error("[Vobiz] Login failed:", err);
-    setLoginStatus(`Sign-in failed: ${err.message}`);
-    accountReady = false;
-    refreshDialState();
+    setLoginStatus(`Login failed: ${err.message}`);
+    setDialEnabled(false);
   }
 }
 
-async function onLoggedIn(numbers, selected, authId) {
-  renderNumberOptions(numbers, selected);
-  setLoginStatus(`Signed in as ${authId}`);
-  accountReady = Boolean(selected);
-  refreshDialState();
-  showView("dialer");
-
-  // Bind this SIP endpoint to a Vobiz application pointing at the backend's
-  // /answer. This is not optional and not a convenience: when the browser
-  // dials, Vobiz fetches the answer URL of the application the ENDPOINT is
-  // bound to. Unbound, there is no answer URL, so there is no <Dial> and the
-  // call dies with no error anywhere in the panel.
-  //
-  // Idempotent — the backend reuses an existing application when the answer URL
-  // already matches, so this is safe to run on every sign-in.
+async function vobizSelectNumber(e) {
+  const number = e.target.value;
   try {
-    const setup = await backendJson("/setup", { method: "POST" });
-    console.log(`[Vobiz] endpoint ${setup.sipUser} bound to app ${setup.appId} (${setup.answerUrl})`);
-  } catch (err) {
-    // Non-fatal for registration — the panel still comes up and can receive —
-    // but outbound will not work, so say so plainly rather than letting the
-    // agent discover it on a call that goes nowhere.
-    console.error("[Vobiz] Endpoint setup failed:", err);
-    setLoginStatus(`Signed in as ${authId} — but call routing is not set up: ${err.message}`);
-  }
-
-  initVobizSip();
-}
-
-async function onSelectNumber(event) {
-  const number = event.target.value;
-  try {
-    const data = await backendJson("/select-number", {
+    await backendJson("/select-number", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ number }),
     });
-    setLoginStatus(`Calling from ${data.selected}`);
+    setLoginStatus(`Caller ID set to ${number}`);
   } catch (err) {
-    console.error("[Vobiz] Could not switch numbers:", err);
-    setLoginStatus(`Could not switch numbers: ${err.message}`);
+    setLoginStatus(`Could not set caller ID: ${err.message}`);
   }
 }
 
-// ─── SIP ─────────────────────────────────────────────────────────────────────
+// ─── UI updates ──────────────────────────────────────────────────────────────
 
-async function initVobizSip() {
-  setStatus("Connecting…");
+function setStatus(text, tone = "pending") {
+  const badge = document.getElementById("status") || document.getElementById("vobiz-status-badge");
+  const msg = document.getElementById("status-message") || document.getElementById("status-text");
 
-  // Surface a dead microphone path now rather than mid-call. Inside the Zendesk
-  // iframe this fails when the app frame is not granted microphone permission,
-  // and the symptom otherwise is a call that rings and connects to silence.
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    setStatus("No microphone access in this frame — calls cannot connect.");
-    return;
+  if (badge) {
+    if (text === "Ready" || tone === "ok") {
+      badge.textContent = "READY";
+      badge.className = "status-badge is-ok registered";
+    } else if (tone === "error") {
+      badge.textContent = "OFFLINE";
+      badge.className = "status-badge is-error unregistered";
+    } else {
+      badge.textContent = text.toUpperCase();
+      badge.className = `status-badge is-${tone}`;
+    }
   }
 
-  let agent;
-  try {
-    agent = await backendJson("/agent");
-  } catch (err) {
-    console.error("[Vobiz] Could not load the SIP identity:", err);
-    setStatus("Cannot reach the calling backend — check the Backend URL in this app's settings.");
-    setSipRegistered(false);
-    return;
-  }
-  agentIdentity = agent;
-  if (agent.registrarUrl) registrarUrl = agent.registrarUrl;
-
-  // Everything below throws if the SIP library did not load, and a throw here
-  // leaves the panel frozen on "Registering…" forever: the status was already
-  // set, and no UA exists to emit registrationFailed. Say what actually
-  // happened instead of stalling.
-  if (typeof JsSIP === "undefined") {
-    console.error("[Vobiz] JsSIP failed to load — assets/lib/jssip.min.js is missing or was blocked.");
-    setStatus("SIP library failed to load — the panel cannot register.");
-    setSipRegistered(false);
-    return;
-  }
-
-  setStatus(`Registering ${agent.displayName}…`);
-
-  try {
-  const socket = new JsSIP.WebSocketInterface(registrarUrl);
-  vobizUA = new JsSIP.UA({
-    sockets: [socket],
-    uri: `sip:${agent.sipUser}`,
-    password: agent.sipPassword,
-    register: true,
-    // Vobiz's media server rejects JsSIP's default session-timer proposal with
-    // "422 Session Interval Too Small", which JsSIP surfaces as the opaque
-    // cause "SIP Failure Code" and which produces NO CDR AT ALL, because the
-    // call is refused before it is ever created. Vobiz's own SDK sets this same
-    // flag, so matching it is the supported configuration, not a workaround.
-    session_timers: false,
-    // No space in the User-Agent, deliberately. Vobiz stores the registration's
-    // User-Agent and later interpolates it unescaped into a gateway URI as a
-    // `user_agent=` parameter. JsSIP's default is "JsSIP 3.10.1" — the space
-    // makes that URI unparseable and Kamailio drops the INVITE rather than
-    // ringing us.
-    user_agent: "VobizZendeskCalling/2.0.0",
-  });
-
-  vobizUA.on("registered", () => {
-    setStatus(`Ready — ${agent.displayName}`);
-    setSipRegistered(true);
-  });
-  vobizUA.on("registrationFailed", e => {
-    setStatus(`Registration failed: ${(e && e.cause) || "unknown"}`);
-    setSipRegistered(false);
-  });
-  // Without these two a dropped transport leaves the panel reading "Ready"
-  // while the endpoint is uncallable.
-  vobizUA.on("unregistered", () => {
-    setStatus("Not registered — reconnecting…");
-    setSipRegistered(false);
-  });
-  vobizUA.on("disconnected", () => {
-    setStatus("Disconnected from the registrar — reconnecting…");
-    setSipRegistered(false);
-  });
-
-  vobizUA.on("newRTCSession", data => {
-    if (data.originator !== "remote") return;
-    onIncomingCall(data.session);
-  });
-
-  vobizUA.start();
-  } catch (err) {
-    console.error("[Vobiz] Could not start the SIP stack:", err);
-    setStatus(`Could not start the SIP stack — ${err.message}`);
-    setSipRegistered(false);
+  if (msg) {
+    msg.textContent = text;
+    if (text === "Ready" || tone === "ok") {
+      msg.className = "status-message is-ok";
+    } else if (tone === "error") {
+      msg.className = "status-message is-error";
+    } else if (tone === "busy") {
+      msg.className = "status-message is-busy";
+    } else {
+      msg.className = `status-message is-${tone}`;
+    }
   }
 }
 
-/**
- * Inbound. Currently unreachable — <Dial><User> into a registered WebRTC
- * endpoint is blocked platform-side (ISSUES.md #1) — but the handler is correct
- * and starts working the day Vobiz fixes its gateway URI.
- */
-function onIncomingCall(session) {
-  callDirection = "Inbound";
-  currentRTCSession = session;
+function setLoginStatus(text) {
+  const el = document.getElementById("vobiz-login-status");
+  if (el) el.textContent = text;
+}
 
-  const callerNumber = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || "Unknown";
-  lastDialedNumber = callerNumber;
+function setDialEnabled(enabled) {
+  accountReady = Boolean(enabled);
+  updateDialButtonState();
+}
 
-  if (client) client.invoke("popover", "show").catch(() => { /* popover may already be open */ });
-  showCallView("Incoming call", callerNumber, "Ringing…");
-  searchZendeskUser(callerNumber);
-  findCurrentTicketId().then(id => { activeTicketId = id; });
+function setSipRegistered(registered) {
+  sipRegistered = Boolean(registered);
+  const badge = document.getElementById("status") || document.getElementById("vobiz-status-badge");
+  if (badge) {
+    if (registered) {
+      badge.textContent = "READY";
+      badge.className = "status-badge is-ok registered";
+    } else {
+      badge.textContent = "OFFLINE";
+      badge.className = "status-badge is-error unregistered";
+    }
+  }
+  updateDialButtonState();
+}
 
-  attachRemoteAudio(session);
-  bindSessionLifecycle(session, callerNumber);
+function updateDialButtonState() {
+  const dialBtn = document.getElementById("dialbtn");
+  const numSelect = document.getElementById("vobiz-number-select");
+  const dialInput = document.getElementById("dialnumber");
 
+  const canDial = accountReady && sipRegistered;
+  if (dialBtn) dialBtn.disabled = !canDial;
+  if (dialInput) dialInput.disabled = !accountReady;
+  if (numSelect) numSelect.disabled = !accountReady;
+}
+
+function setHangupVisible(visible) {
+  const dialBtn = document.getElementById("dialbtn");
+  const hangupBtn = document.getElementById("hangupbtn");
+  const numEl = document.getElementById("callnum");
+  const timerEl = document.getElementById("call-timer");
+
+  if (visible) {
+    if (dialBtn) dialBtn.hidden = true;
+    if (hangupBtn) hangupBtn.hidden = false;
+    if (timerEl) timerEl.hidden = false;
+  } else {
+    if (dialBtn) dialBtn.hidden = false;
+    if (hangupBtn) hangupBtn.hidden = true;
+    if (timerEl) timerEl.hidden = true;
+    if (numEl) numEl.hidden = true;
+  }
+}
+
+function renderNumberOptions(numbers, selected) {
+  const select = document.getElementById("vobiz-number-select");
+  const label = document.getElementById("vobiz-number-label");
+  if (!select) return;
+  select.innerHTML = "";
+  if (!numbers || !numbers.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No numbers found on this account";
+    select.appendChild(opt);
+    select.disabled = true;
+    return;
+  }
+  numbers.forEach(num => {
+    const opt = document.createElement("option");
+    opt.value = num;
+    opt.textContent = num;
+    if (num === selected) opt.selected = true;
+    select.appendChild(opt);
+  });
+  select.disabled = false;
+  select.hidden = false;
+  if (label) label.hidden = false;
+}
+
+// ─── recordings & history ────────────────────────────────────────────────────
+
+async function loadCallHistory() {
+  const historyList = document.getElementById("call-history-list");
+  if (!historyList) return;
+
+  historyList.innerHTML = `<li class="history-empty">Loading recent recordings…</li>`;
   try {
-    // pcConfig matters here exactly as much as on an outbound call: without
-    // STUN the answer carries host-only candidates and the leg is torn down
-    // without connecting, leaving a CDR billed 0s and no explanation.
-    session.answer({
-      mediaConstraints: { audio: true, video: false },
-      pcConfig: { iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] },
-      sessionTimersExpires: 300,
+    const data = await backendJson("/recordings?limit=10");
+    const recordings = (data && data.recordings) || [];
+    if (!recordings.length) {
+      historyList.innerHTML = `<li class="history-empty">No calls recorded yet. Completed calls with audio will appear here automatically.</li>`;
+      return;
+    }
+
+    historyList.innerHTML = "";
+    recordings.forEach(rec => {
+      const li = document.createElement("li");
+      li.className = "history-item";
+
+      const topRow = document.createElement("div");
+      topRow.className = "history-top";
+
+      const timeSpan = document.createElement("span");
+      timeSpan.className = "history-time";
+      timeSpan.textContent = rec.add_time || "Recent call";
+
+      const durSpan = document.createElement("span");
+      durSpan.className = "history-dur";
+      durSpan.textContent = formatDuration(Number(rec.rounded_recording_duration || 0));
+
+      topRow.appendChild(timeSpan);
+      topRow.appendChild(durSpan);
+
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.preload = "none";
+      audio.className = "history-audio";
+      audio.src = `${backendUrl}/play-recording?callUuid=${encodeURIComponent(rec.call_uuid)}`;
+
+      li.appendChild(topRow);
+      li.appendChild(audio);
+      historyList.appendChild(li);
     });
   } catch (err) {
-    // A throw inside this handler used to abort before .answer() ran: the
-    // browser silently never picked up, Vobiz rang until it timed out, and the
-    // dial result read ring=true with no B leg and no explanation anywhere.
-    console.error("[Vobiz] Could not answer the incoming call:", err);
-    setStatus(`Could not answer — ${err.name === "NotAllowedError" ? "microphone permission was refused for this frame" : err.message}`);
-    try { session.terminate(); } catch { /* already gone */ }
-    currentRTCSession = null;
+    historyList.innerHTML = `<li class="history-empty">Recordings unavailable (${err.message}). Sign in above to view recordings.</li>`;
   }
 }
 
-/**
- * For an INCOMING session JsSIP has not built the RTCPeerConnection yet —
- * session.connection is null until the call is answered. Dereferencing it here
- * throws, and the throw aborts the handler before .answer() runs. Bind through
- * the "peerconnection" event, and only fall back to session.connection when one
- * already exists.
- */
+// ─── inbound setup helper ───────────────────────────────────────────────────
+
+async function setupInboundCalling() {
+  const statusEl = document.getElementById("inbound-setup-status");
+  if (statusEl) {
+    statusEl.textContent = "Configuring inbound webhook…";
+    statusEl.hidden = false;
+  }
+  try {
+    const data = await backendJson("/setup-inbound", { method: "POST" });
+    if (statusEl) {
+      statusEl.textContent = data.message || "Inbound configuration updated successfully.";
+    }
+  } catch (err) {
+    if (statusEl) {
+      statusEl.textContent = `Inbound setup note: ${err.message}`;
+    }
+  }
+}
+
+// ─── SIP WebRTC client ───────────────────────────────────────────────────────
+
 function attachRemoteAudio(session) {
   const audioEl = document.getElementById("vobiz-remote-audio");
   if (!audioEl) return;
@@ -421,202 +541,381 @@ function attachRemoteAudio(session) {
   bindTrack(session.connection);
 }
 
-function bindSessionLifecycle(session, number) {
-  session.on("progress", () => setCallState(`Ringing ${number}…`, "call-ringing"));
-  session.on("confirmed", () => {
-    setCallState("Active call", "call-active");
-    document.getElementById("call-timer").classList.remove("is-hidden");
-    startTimer();
-  });
-  session.on("ended", () => endCall("Call ended"));
-  session.on("failed", e => endCall(`Call failed — ${(e && e.cause) || "unknown"}`));
+async function initVobizSip() {
+  if (vobizUA && vobizUA.isRegistered()) return;
+
+  let agent;
+  try {
+    const res = await backendFetch(`/agent/${encodeURIComponent(agentId)}`);
+    if (!res.ok) {
+      // Fallback for session-based /agent
+      const resSession = await backendFetch("/agent");
+      if (resSession.ok) agent = await resSession.json();
+      else {
+        setStatus(`Could not load the identity "${agentId}" — check this app's settings.`, "error");
+        setSipRegistered(false);
+        return;
+      }
+    } else {
+      agent = await res.json();
+    }
+  } catch (err) {
+    console.error("[Vobiz] Could not reach calling backend:", err);
+    setStatus("Cannot reach the calling backend — check the Backend URL in this app's settings.", "error");
+    setSipRegistered(false);
+    return;
+  }
+
+  agentIdentity = agent;
+  startSipUA(agent.sipUser, agent.sipPassword, agent.displayName);
 }
 
-// ─── placing a call ──────────────────────────────────────────────────────────
+// ─── Incoming Call Controls & Ringtone ───────────────────────────────────────
+
+let incomingPending = false;
+let ringCtx = null;
+let ringTimer = null;
+
+function startRingtone() {
+  stopRingtone();
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    ringCtx = new Ctx();
+    const beep = () => {
+      if (!ringCtx) return;
+      const osc = ringCtx.createOscillator();
+      const gain = ringCtx.createGain();
+      osc.frequency.value = 440;
+      gain.gain.setValueAtTime(0.0001, ringCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.12, ringCtx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ringCtx.currentTime + 0.9);
+      osc.connect(gain).connect(ringCtx.destination);
+      osc.start();
+      osc.stop(ringCtx.currentTime + 0.95);
+    };
+    beep();
+    ringTimer = setInterval(beep, 2000);
+  } catch (err) {
+    console.warn("[Vobiz] ringtone note:", err);
+  }
+}
+
+function stopRingtone() {
+  if (ringTimer) { clearInterval(ringTimer); ringTimer = null; }
+  if (ringCtx) {
+    try { ringCtx.close(); } catch { /* ignore */ }
+    ringCtx = null;
+  }
+}
+
+function showIncoming(caller) {
+  const fromEl = document.getElementById("incoming-from");
+  if (fromEl) fromEl.textContent = caller || "Unknown";
+  const banner = document.getElementById("incoming");
+  if (banner) banner.hidden = false;
+}
+
+function endIncoming(status = "Ready") {
+  incomingPending = false;
+  stopRingtone();
+  const banner = document.getElementById("incoming");
+  if (banner) banner.hidden = true;
+  setHangupVisible(false);
+  currentRTCSession = null;
+  if (status) setStatus(status, "ok");
+}
+
+async function acceptCall() {
+  if (!currentRTCSession) return;
+  incomingPending = false;
+  stopRingtone();
+  const banner = document.getElementById("incoming");
+  if (banner) banner.hidden = true;
+
+  try {
+    attachRemoteAudio(currentRTCSession);
+    currentRTCSession.answer({
+      mediaConstraints: { audio: true, video: false },
+      pcConfig: { iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] },
+      sessionTimersExpires: 300,
+    });
+    setHangupVisible(true);
+    setStatus("On a call", "busy");
+  } catch (err) {
+    console.error("[Vobiz] Could not answer incoming leg:", err);
+    try { currentRTCSession.terminate(); } catch { /* ignore */ }
+    endIncoming();
+  }
+}
+
+function declineCall() {
+  if (!currentRTCSession) return;
+  incomingPending = false;
+  try {
+    currentRTCSession.terminate();
+  } catch (err) {
+    console.warn("[Vobiz] decline failed:", err);
+  }
+  endIncoming();
+}
+
+/**
+ * Bring up the SIP stack for one identity.
+ *
+ * Shared by both ways in: the account sign-in above, which asks the backend
+ * which identity this installation is, and SIP-direct sign-in, where the agent
+ * types the endpoint's own credentials and the backend is never involved.
+ */
+function startSipUA(sipUser, sipPassword, displayName) {
+  setStatus(`Connecting as ${displayName || sipUser}…`, "pending");
+
+  if (vobizUA) {
+    const previous = vobizUA;
+    vobizUA = null;
+    try { previous.removeAllListeners(); } catch { /* ignore */ }
+    try { previous.stop(); } catch { /* ignore */ }
+  }
+
+  if (typeof JsSIP === "undefined") {
+    console.error("[Vobiz] JsSIP is undefined — assets/lib/jssip.min.js missing or blocked.");
+    setStatus("SIP library failed to load.", "error");
+    setSipRegistered(false);
+    return;
+  }
+
+  try {
+    const cleanUri = sipUser.startsWith("sip:") ? sipUser : `sip:${sipUser}`;
+    const vobizSocket = new JsSIP.WebSocketInterface(registrarUrl);
+    vobizUA = new JsSIP.UA({
+      sockets: [vobizSocket],
+      uri: cleanUri,
+      password: sipPassword,
+      display_name: displayName || sipUser,
+      register: true,
+      user_agent: "VobizZendeskCalling/2.0.0",
+      session_timers: false,
+    });
+
+    vobizUA.on("registered", () => {
+      setStatus("Ready", "ok");
+      setSipRegistered(true);
+    });
+    vobizUA.on("registrationFailed", e => {
+      setStatus(`Registration failed: ${(e && e.cause) || "unknown"}`, "error");
+      setSipRegistered(false);
+    });
+    vobizUA.on("unregistered", () => {
+      setStatus("Not registered — reconnecting…", "pending");
+      setSipRegistered(false);
+    });
+    vobizUA.on("disconnected", () => {
+      setStatus("Disconnected from registrar", "error");
+      setSipRegistered(false);
+    });
+
+    // Handle incoming calls (inbound leg)
+    vobizUA.on("newRTCSession", data => {
+      if (data.originator !== "remote") return;
+
+      const remoteCaller = (data.session && data.session.remote_identity && data.session.remote_identity.uri && data.session.remote_identity.uri.user) || "Unknown caller";
+      callDirection = "Inbound";
+      currentRTCSession = data.session;
+      incomingPending = true;
+
+      // Pop open the Zendesk top bar softphone pane and send a native desktop toast notification
+      if (client) {
+        try { client.invoke("popover", "show"); } catch (e) { /* ignore */ }
+        try { client.invoke("notify", `📞 Incoming call from ${remoteCaller}`, "notice"); } catch (e) { /* ignore */ }
+      }
+
+      setStatus(`Incoming call from ${remoteCaller}`, "busy");
+      showIncoming(remoteCaller);
+      startRingtone();
+
+      currentRTCSession.on("confirmed", () => {
+        startTimer();
+        setStatus("On a call", "busy");
+        const numEl = document.getElementById("callnum");
+        if (numEl) {
+          numEl.textContent = `On a call with ${remoteCaller}`;
+          numEl.hidden = false;
+        }
+      });
+
+      const onCallDone = () => {
+        stopTimer();
+        endIncoming("Ready");
+        const numEl = document.getElementById("callnum");
+        if (numEl) {
+          numEl.textContent = "Call ended";
+          setTimeout(() => { numEl.hidden = true; }, 4000);
+        }
+        setHangupVisible(false);
+        autoLogCallToZendesk();
+        setTimeout(loadCallHistory, 5000);
+      };
+
+      currentRTCSession.on("ended", onCallDone);
+      currentRTCSession.on("failed", onCallDone);
+    });
+
+    vobizUA.start();
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus("No microphone access in this frame — calls cannot connect.", "error");
+    }
+  } catch (err) {
+    console.error("[Vobiz] Failed to initialise SIP UA:", err);
+    setStatus("Failed to connect SIP transport.", "error");
+    setSipRegistered(false);
+  }
+}
+
+function callHeaders() {
+  const headers = [];
+  if (authMode === "sip") {
+    const callerId = sipDirectCallerId().replace(/[^\d+]/g, "");
+    if (callerId) headers.push(`X-VH-Caller-ID: ${callerId}`);
+  }
+  return headers;
+}
+
+// ─── place call ──────────────────────────────────────────────────────────────
 
 async function onTriggerDialer(event) {
-  // Zendesk's click-to-dial relay (background.js) passes the number here.
-  const number = event && (event.number || (event.helper && event.helper.getData && event.helper.getData().number));
-  if (event && event.ticketId) activeTicketId = event.ticketId;
-  if (client) client.invoke("popover", "show").catch(() => { /* already open */ });
-  callDirection = "Outbound";
-  await placeCall(number);
+  if (client) {
+    try { await client.invoke("popout"); } catch { /* non-fatal */ }
+  }
+  const data = (event && event.helper && event.helper.getData && event.helper.getData()) || (event && event.data) || event || {};
+  const number = data.number || data.phoneNumber || (typeof data === "string" ? data : "");
+  if (data.ticketId) activeTicketId = data.ticketId;
+  if (number && typeof number === "string") {
+    const input = document.getElementById("dialnumber");
+    if (input) input.value = number;
+    await placeCall(number);
+  }
 }
 
 function onDialButtonClick() {
   const input = document.getElementById("dialnumber");
   const number = input && input.value.trim();
-  callDirection = "Outbound";
   placeCall(number);
 }
 
-/**
- * Place an outbound call with this browser as the A leg.
- *
- * The panel sends the INVITE itself. Vobiz then fetches the answer URL of the
- * application this SIP endpoint is bound to, and the backend replies with
- * <Dial><Number> to reach the customer — the same shape Vobiz's own rtc-demo
- * and WebRTC playground use.
- */
 async function placeCall(number) {
   if (!number) return;
 
-  if (!vobizUA || !sipRegistered) {
-    setLoginStatus("Not registered yet — wait for the status to read Ready.");
-    return;
+  const numEl = document.getElementById("callnum");
+  if (numEl) {
+    numEl.textContent = `Calling ${number}…`;
+    numEl.hidden = false;
   }
-  if (currentRTCSession) {
-    setLoginStatus("Already on a call.");
+
+  if (!vobizUA || !sipRegistered) {
+    const message = "Not registered yet — wait for the badge to go green.";
+    if (numEl) numEl.textContent = message;
+    setLoginStatus(message);
     return;
   }
 
+  if (currentRTCSession) {
+    if (numEl) numEl.textContent = "Already on an active call.";
+    return;
+  }
+
+  callDirection = "Outbound";
   lastDialedNumber = number;
   lastCallRecord = null;
-  showCallView("Dialling", number, "Connecting…");
   searchZendeskUser(number);
   activeTicketId = await findCurrentTicketId();
 
-  // Vobiz routes a bare E.164 destination; the registrar is the SIP domain.
-  const target = `sip:${String(number).replace(/[^\d+]/g, "")}@${REGISTRAR_HOST}`;
+  const cleanNumber = String(number).replace(/[^\d+]/g, "");
+  const target = `sip:${cleanNumber}@${REGISTRAR_HOST}`;
 
   try {
     const session = vobizUA.call(target, {
+      extraHeaders: callHeaders(),
       mediaConstraints: { audio: true, video: false },
-      // Without STUN the offer carries only host candidates, Vobiz logs
-      // "PrivateIP … Detected in SDP", and the browser rejects the early-media
-      // answer as an incompatible SDP — the call is cancelled a few hundred ms
-      // in with a CDR billed 0s. These are the values Vobiz's own SDK uses.
       pcConfig: { iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] },
       sessionTimersExpires: 300,
     });
+
     currentRTCSession = session;
     attachRemoteAudio(session);
-    bindSessionLifecycle(session, number);
+    setHangupVisible(true);
+
+    session.on("progress", () => {
+      if (numEl) numEl.textContent = `Ringing ${number}…`;
+      setStatus("Ringing", "busy");
+    });
+
+    session.on("confirmed", () => {
+      startTimer();
+      if (numEl) numEl.textContent = `On a call with ${number}`;
+      setStatus("On a call", "busy");
+    });
+
+    session.on("failed", e => {
+      stopTimer();
+      const cause = (e && e.cause) || "unknown";
+      if (numEl) numEl.textContent = `Call failed — ${cause}`;
+      setStatus("Ready", "ok");
+      currentRTCSession = null;
+      setHangupVisible(false);
+    });
+
+    session.on("ended", () => {
+      stopTimer();
+      if (numEl) {
+        numEl.textContent = "Call ended";
+        setTimeout(() => { numEl.hidden = true; }, 4000);
+      }
+      setStatus("Ready", "ok");
+      currentRTCSession = null;
+      setHangupVisible(false);
+
+      // Log call to ticket and refresh recordings
+      autoLogCallToZendesk();
+      setTimeout(loadCallHistory, 5000);
+    });
   } catch (err) {
     console.error("[Vobiz] Could not start the call:", err);
-    setCallState(
-      err && err.name === "NotAllowedError"
-        ? "Microphone permission was refused for this frame"
-        : `Could not start the call — ${err.message}`,
-      "call-ended",
-    );
+    const message = err && err.name === "NotAllowedError"
+      ? "Microphone permission was refused for this frame"
+      : `Could not start the call — ${err.message}`;
+    if (numEl) numEl.textContent = message;
+    setLoginStatus(message);
+    setHangupVisible(false);
   }
 }
 
-function onHangupButtonClick() {
-  const btn = document.getElementById("hangupbtn");
-  if (btn && btn.dataset.mode === "close") {
-    resetToDialer();
-    return;
-  }
-  // A SIP BYE from this leg is enough: the browser is the A leg, so hanging it
-  // up tears the whole call down. There is no REST hangup to make.
-  if (currentRTCSession) {
-    try { currentRTCSession.terminate(); } catch (err) { console.warn("[Vobiz] hangup failed:", err); }
-  } else {
-    endCall("Call ended");
+function hangUp() {
+  if (!currentRTCSession) return;
+  try {
+    currentRTCSession.terminate();
+  } catch (err) {
+    console.warn("[Vobiz] hangup failed:", err);
   }
 }
 
-async function endCall(statusText) {
-  stopTimer();
-  currentRTCSession = null;
-  setCallState(statusText, "call-ended");
-  setStatus(agentIdentity ? `Ready — ${agentIdentity.displayName}` : "Ready", "status-ready");
-
-  const btn = document.getElementById("hangupbtn");
-  if (btn) {
-    btn.textContent = "Close";
-    btn.className = "btn btn-secondary";
-    btn.dataset.mode = "close";
-  }
-  document.getElementById("call-log-section").classList.remove("is-hidden");
-
-  // Vobiz writes the CDR a few seconds after hangup and the recording callback
-  // lands later still, so poll briefly rather than expecting either to be ready
-  // the instant the session ends.
-  pollForCallRecord();
-}
-
-async function pollForCallRecord() {
-  for (const delay of [3000, 5000, 8000]) {
-    await new Promise(r => setTimeout(r, delay));
-    try {
-      const rec = await backendJson(`/call-record?to=${encodeURIComponent(lastDialedNumber)}`);
-      if (rec.found) {
-        lastCallRecord = rec;
-        renderRecordingPreview(rec);
-        if (rec.recordingId) return;
-      }
-    } catch { /* the panel still works without it */ }
-  }
-}
-
-function renderRecordingPreview(rec) {
-  const box = document.getElementById("recording-preview-box");
-  if (!box) return;
-  if (rec.recordingUrl) {
-    box.className = "notice notice-success";
-    box.textContent = "Recording ready — it will be linked in the ticket note.";
-  } else if (rec.bLegUuid) {
-    box.className = "notice";
-    box.textContent = `Call connected (${rec.duration || 0}s). The recording is still processing.`;
-  } else {
-    // An empty DialBLegUUID is the single most useful diagnostic in this stack:
-    // it means no B leg was ever created, whatever the UI said.
-    box.className = "notice";
-    box.textContent = "No B leg was created — the destination was unreachable, or the caller ID is not owned by this account.";
-  }
-}
-
-function resetToDialer() {
-  document.getElementById("call-notes").value = "";
-  document.getElementById("dialnumber").value = "";
-  document.getElementById("call-log-section").classList.add("is-hidden");
-  const btn = document.getElementById("hangupbtn");
-  if (btn) {
-    btn.textContent = "Hang Up";
-    btn.className = "btn btn-hangup";
-    delete btn.dataset.mode;
-  }
-  lastCallRecord = null;
-  resolvedUser = null;
-  showView("dialer");
-}
-
-// ─── Zendesk write-back ──────────────────────────────────────────────────────
+// ─── Zendesk ticket write-back ───────────────────────────────────────────────
 
 function searchZendeskUser(phoneNumber) {
   resolvedUser = null;
-  const infoEl = document.getElementById("contact-info");
-  if (infoEl) infoEl.classList.add("is-hidden");
   if (!client) return;
-
   const clean = String(phoneNumber).replace(/[^\d+]/g, "");
   if (!clean) return;
 
-  // ZAF proxies this with the agent's own session, so it respects their
-  // permissions — no API token needed and nothing to leak.
   client.request(`/api/v2/search.json?query=${encodeURIComponent(`type:user phone:${clean}`)}`)
     .then(data => {
-      if (!data || !data.results || !data.results.length) return;
-      resolvedUser = data.results[0];
-      document.getElementById("caller-name").textContent = resolvedUser.name;
-      document.getElementById("zd-user-name").textContent = resolvedUser.name;
-      if (infoEl) infoEl.classList.remove("is-hidden");
-      const btn = document.getElementById("view-profile-btn");
-      if (btn) btn.onclick = () => client.invoke("routeTo", "user", resolvedUser.id);
+      if (data && data.results && data.results.length) {
+        resolvedUser = data.results[0];
+      }
     })
-    .catch(err => console.warn("[Vobiz] Zendesk user search failed:", err));
+    .catch(err => console.warn("[Vobiz] Zendesk user search note:", err.message));
 }
 
-/**
- * Which ticket is the agent looking at?
- *
- * A top_bar app has no page context of its own, so this asks every ticket_sidebar
- * instance of this app. That requires the ticket_sidebar location to be
- * installed — without it there is no ticket context and calls log as new tickets.
- */
 async function findCurrentTicketId() {
   if (!client) return null;
   try {
@@ -627,197 +926,99 @@ async function findCurrentTicketId() {
       if (data && data["ticket.id"]) return data["ticket.id"];
     }
   } catch (err) {
-    console.warn("[Vobiz] Could not resolve the active ticket:", err);
+    console.warn("[Vobiz] Could not resolve active ticket:", err);
   }
   return null;
 }
 
-async function onLogButtonClick() {
-  const notes = document.getElementById("call-notes").value.trim();
-  const customerPhone = document.getElementById("caller-phone").textContent;
+async function autoLogCallToZendesk() {
+  if (!client && !backendUrl) return;
 
-  setStatus("Saving call log…");
+  // Short delay so backend call ledger captures the CallUUID
+  await new Promise(r => setTimeout(r, 1200));
 
-  // The backend mints the recording link from its own call ledger. The browser
-  // never constructs it, because the previous build built one carrying the
-  // account Auth Token as a query parameter — and then wrote it into a ticket
-  // comment, where every agent could read it forever.
+  let recordingUrl = "";
   try {
-    const result = await backendJson("/sync-call", {
+    const recData = await backendJson(`/call-record?to=${encodeURIComponent(lastDialedNumber)}`);
+    if (recData && recData.found && recData.callUuid) {
+      recordingUrl = recData.recordingUrl || `${backendUrl}/play-recording?callUuid=${recData.callUuid}`;
+    }
+  } catch (e) {
+    console.warn("[Vobiz] call-record fetch note:", e.message);
+  }
+
+  const durationText = formatDuration(callDurationSeconds);
+  const customerName = resolvedUser ? resolvedUser.name : "Customer";
+  const body = `[Vobiz Call Log]\n` +
+    `Date: ${new Date().toLocaleString()}\n` +
+    `Direction: ${callDirection}\n` +
+    `Phone: ${lastDialedNumber}\n` +
+    `Duration: ${durationText}\n` +
+    (recordingUrl ? `Recording: 🎧 [Listen to Call Recording](${recordingUrl})\n` : '') +
+    `Status: Completed`;
+
+  try {
+    // Attempt backend sync
+    await backendJson("/sync-call", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         subdomain: zendeskSubdomain,
         ticketId: activeTicketId,
-        toNumber: customerPhone,
+        toNumber: lastDialedNumber,
         duration: callDurationSeconds,
         callDirection,
-        notes,
+        notes: `Call with ${customerName} (${lastDialedNumber})`,
         requesterId: resolvedUser ? resolvedUser.id : null,
-        callUuid: lastCallRecord ? lastCallRecord.callUuid : null,
       }),
     });
-    if (client) client.invoke("notify", `Call logged to ticket #${result.ticketId} (${result.mode}).`);
-    resetToDialer();
+    if (client) client.invoke("notify", "Call logged to Zendesk.");
     return;
   } catch (err) {
-    console.warn("[Vobiz] Backend sync failed, falling back to ZAF:", err);
+    console.warn("[Vobiz] Backend sync failed, attempting direct ZAF log:", err.message);
   }
 
-  // Fallback: write through ZAF with the agent's own session. No recording
-  // link, because minting one needs the backend.
-  const durationText = formatDuration(callDurationSeconds);
-  const body = `[Vobiz Call Log]\n` +
-    `Date: ${new Date().toLocaleString()}\n` +
-    `Direction: ${callDirection}\n` +
-    `Customer: ${resolvedUser ? resolvedUser.name : "Unknown"} (${customerPhone})\n` +
-    `Duration: ${durationText}\n` +
-    `Notes: ${notes || "No notes provided."}`;
-
-  try {
-    if (!client) { console.log(body); resetToDialer(); return; }
-    if (activeTicketId) {
-      await client.request({
-        url: `/api/v2/tickets/${activeTicketId}.json`,
-        type: "PUT",
-        contentType: "application/json",
-        data: JSON.stringify({ ticket: { comment: { body, public: false } } }),
-      });
-      client.invoke("notify", `Call logged to ticket #${activeTicketId}.`);
-    } else {
-      const res = await client.request({
-        url: "/api/v2/tickets.json",
-        type: "POST",
-        contentType: "application/json",
-        data: JSON.stringify({
-          ticket: {
-            subject: `Call with ${resolvedUser ? resolvedUser.name : customerPhone}`,
-            comment: { body, public: false },
-            type: "task",
-            status: "solved",
-            requester_id: resolvedUser ? resolvedUser.id : null,
-          },
-        }),
-      });
-      if (res && res.ticket) client.invoke("notify", `Call logged as ticket #${res.ticket.id}.`);
+  // ZAF fallback
+  if (client) {
+    try {
+      if (activeTicketId) {
+        await client.request({
+          url: `/api/v2/tickets/${activeTicketId}.json`,
+          type: "PUT",
+          contentType: "application/json",
+          data: JSON.stringify({ ticket: { comment: { body, public: false } } }),
+        });
+        client.invoke("notify", `Call logged to ticket #${activeTicketId}.`);
+      } else {
+        const res = await client.request({
+          url: "/api/v2/tickets.json",
+          type: "POST",
+          contentType: "application/json",
+          data: JSON.stringify({
+            ticket: {
+              subject: `Call with ${customerName} (${lastDialedNumber})`,
+              comment: { body, public: false },
+              type: "task",
+              status: "solved",
+              requester_id: resolvedUser ? resolvedUser.id : null,
+            },
+          }),
+        });
+        if (res && res.ticket) client.invoke("notify", `Call logged as ticket #${res.ticket.id}.`);
+      }
+    } catch (zafErr) {
+      console.warn("[Vobiz] Direct ZAF logging note:", zafErr.message);
     }
-  } catch (err) {
-    console.error("[Vobiz] Could not log the call:", err);
-    if (client) client.invoke("notify", "Could not save the call log to Zendesk.", "error");
-  }
-  resetToDialer();
-}
-
-// ─── UI helpers ──────────────────────────────────────────────────────────────
-
-/**
- * Status is two things, not one.
- *
- * The header carries a short STATE — that is what a badge is for. The full
- * sentence, which can run to seventy characters, goes in the message row
- * beneath it where there is room to read it. Cramming a sentence into a nowrap
- * pill is what makes the header overflow.
- */
-function statusState(text) {
-  if (/^ready/i.test(text)) return { label: "Ready", tone: "ok" };
-  if (/^on a call|^active/i.test(text)) return { label: "On a call", tone: "busy" };
-  if (/ringing/i.test(text)) return { label: "Ringing", tone: "busy" };
-  if (/^connecting|^registering/i.test(text)) return { label: "Connecting", tone: "pending" };
-  if (/reconnecting/i.test(text)) return { label: "Reconnecting", tone: "pending" };
-  if (/^saving/i.test(text)) return { label: "Saving", tone: "pending" };
-  return { label: "Offline", tone: "error" };
-}
-
-function setStatus(text) {
-  const { label, tone } = statusState(text);
-  const badge = document.getElementById("status");
-  if (badge) {
-    badge.textContent = label;
-    badge.className = `status-badge is-${tone}`;
-  }
-  const msg = document.getElementById("status-message");
-  if (msg) {
-    // Only show the sentence when it says more than the badge already does.
-    const redundant = label.toLowerCase() === text.trim().toLowerCase();
-    msg.textContent = redundant ? "" : text;
-    msg.classList.toggle("is-hidden", redundant);
-    msg.className = `status-message is-${tone}${redundant ? " is-hidden" : ""}`;
   }
 }
 
-function setLoginStatus(text) {
-  const el = document.getElementById("vobiz-login-status");
-  if (el) el.textContent = text;
-}
-
-function setCallState(text, className) {
-  const el = document.getElementById("call-state-text");
-  if (el) { el.textContent = text; el.className = className || "call-ringing"; }
-}
-
-function showView(name) {
-  // The design system hides panels with .is-hidden, not inline display. Setting
-  // style.display here would win the cascade and strip the panel's transition.
-  for (const [id, wanted] of [["login-view", "login"], ["dialer-view", "dialer"], ["call-view", "call"]]) {
-    const el = document.getElementById(id);
-    if (el) el.classList.toggle("is-hidden", name !== wanted);
-  }
-}
-
-function showCallView(title, number, state) {
-  showView("call");
-  document.getElementById("caller-name").textContent = title;
-  document.getElementById("caller-phone").textContent = number;
-  document.getElementById("call-timer").classList.add("is-hidden");
-  document.getElementById("call-log-section").classList.add("is-hidden");
-  const box = document.getElementById("recording-preview-box");
-  if (box) { box.className = "notice notice-success"; box.textContent = "Recording enabled — the audio link is attached to the ticket note."; }
-  const btn = document.getElementById("hangupbtn");
-  if (btn) { btn.textContent = "Hang Up"; btn.className = "btn btn-hangup"; delete btn.dataset.mode; }
-  setCallState(state, "call-ringing");
-}
-
-function renderNumberOptions(numbers, selected) {
-  const select = document.getElementById("from-number-select");
-  if (!select) return;
-  select.innerHTML = "";
-  (numbers || []).forEach(n => {
-    const opt = document.createElement("option");
-    opt.value = n;
-    opt.textContent = n;
-    if (n === selected) opt.selected = true;
-    select.appendChild(opt);
-  });
-}
-
-function setSipRegistered(value) {
-  sipRegistered = Boolean(value);
-  refreshDialState();
-}
-
-function refreshDialState() {
-  const btn = document.getElementById("dialbtn");
-  if (!btn) return;
-  // Never gated on the Endpoint API's sip_registered: that field stays "false"
-  // even when registration genuinely succeeded, on every endpoint on the
-  // account. JsSIP's own "registered" event is the only reliable signal.
-  const ready = accountReady && sipRegistered;
-  btn.disabled = !ready;
-  const hint = document.getElementById("dial-hint");
-  if (!hint) return;
-  if (ready) hint.textContent = "";
-  else if (!accountReady) hint.textContent = "Sign in to enable calling.";
-  else hint.textContent = "Not registered — calling is disabled until the panel reconnects.";
-}
+// ─── timer helper ────────────────────────────────────────────────────────────
 
 function startTimer() {
   callDurationSeconds = 0;
   clearInterval(timerInterval);
-  const el = document.getElementById("call-timer");
-  el.textContent = "00:00";
   timerInterval = setInterval(() => {
     callDurationSeconds++;
-    el.textContent = formatDuration(callDurationSeconds);
   }, 1000);
 }
 
@@ -827,17 +1028,7 @@ function stopTimer() {
 }
 
 function formatDuration(seconds) {
-  const m = String(Math.floor(seconds / 60)).padStart(2, "0");
-  const s = String(seconds % 60).padStart(2, "0");
-  return `${m}:${s}`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${s}s`;
 }
-
-// Dialpad. DTMF only goes out on a confirmed session — JsSIP throws otherwise.
-window.pressKey = function (key) {
-  const input = document.getElementById("dialnumber");
-  if (currentRTCSession && currentRTCSession.isEstablished && currentRTCSession.isEstablished()) {
-    try { currentRTCSession.sendDTMF(key); } catch (err) { console.warn("[Vobiz] DTMF failed:", err); }
-    return;
-  }
-  if (input) input.value += key;
-};

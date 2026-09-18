@@ -225,6 +225,60 @@ body {
 .status-message.is-busy    { background: var(--busy-soft);   color: var(--busy); }
 .status-message.is-pending { background: var(--orange-soft); color: var(--orange-500); }
 
+/* === Incoming call === */
+.incoming {
+  margin: 0 14px 14px;
+  padding: 16px;
+  background: var(--ok-soft);
+  border: 1px solid var(--ok);
+  border-radius: var(--r-lg);
+  text-align: center;
+  animation: incoming-pulse 2s ease-in-out infinite;
+}
+
+.incoming-label {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ok);
+}
+
+.incoming-from {
+  margin: 0 0 12px;
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.incoming-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.incoming-actions .btn {
+  flex: 1;
+  justify-content: center;
+}
+
+.incoming-hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+@keyframes incoming-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(21 128 61 / 0.30); }
+  50%      { box-shadow: 0 0 0 7px rgb(21 128 61 / 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .incoming { animation: none; }
+}
+
 /* ---------- steps -------------------------------------------------------- */
 
 .panel {
@@ -366,6 +420,83 @@ select {
   background-position: right 9px center;
 }
 
+/* ---------- sign-in tabs ----------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--sunken);
+}
+
+.tab {
+  flex: 1;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.is-active {
+  background: var(--card);
+  color: var(--orange-500);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+}
+
+.tab:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* ---------- checkbox / remember row ------------------------------------------ */
+
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 12px;
+  cursor: pointer;
+}
+
+.check-row input[type="checkbox"] {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 1px 0 0;
+  accent-color: var(--orange-500);
+  cursor: pointer;
+}
+
+.check-row input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: 3px;
+}
+
+.check-text {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+
+.check-note {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
 .hint {
   margin: 8px 0 0;
   font-size: 11px;
@@ -425,6 +556,15 @@ select {
 .btn-hangup {
   background: var(--err);
   color: #fff;
+}
+
+.btn-accept {
+  background: var(--ok);
+  color: #fff;
+}
+
+.btn-accept:hover:not([disabled]) {
+  background: #166534;
 }
 
 .btn[disabled],
@@ -623,249 +763,3 @@ audio#vobiz-remote-audio {
   }
 }
 
-/* ===========================================================================
-   Zendesk-only components
-   The panel switches between three views rather than scrolling one column.
-   =========================================================================== */
-
-.is-hidden {
-  display: none !important;
-}
-
-.view-panel {
-  padding: 0 14px;
-}
-
-.header-status-wrapper {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-}
-
-/* ---------- dialpad ------------------------------------------------------- */
-
-.dialpad {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  margin: 12px 0;
-}
-
-.dial-key {
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: var(--r);
-  background: var(--sunken);
-  font-family: inherit;
-  font-size: 15px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-  cursor: pointer;
-  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-}
-
-.dial-key:hover {
-  border-color: var(--orange-500);
-  color: var(--orange-500);
-}
-
-.dial-key:active {
-  background: var(--orange-soft);
-}
-
-.dial-key:focus-visible {
-  outline: none;
-  box-shadow: var(--ring);
-}
-
-/* ---------- active call ---------------------------------------------------- */
-
-.call-card {
-  text-align: center;
-  padding: 16px 0;
-}
-
-.call-animation {
-  position: relative;
-  width: 54px;
-  height: 54px;
-  margin: 0 auto 14px;
-}
-
-.caller-icon {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--orange-soft);
-  color: var(--orange-500);
-}
-
-/* One quiet ring, not a light show. */
-.pulse-ring {
-  position: absolute;
-  inset: -5px;
-  border: 2px solid var(--orange-500);
-  border-radius: 50%;
-  opacity: 0;
-  animation: vbz-ring 1.8s ease-out infinite;
-}
-
-@keyframes vbz-ring {
-  0%   { transform: scale(0.92); opacity: 0.45; }
-  100% { transform: scale(1.22); opacity: 0; }
-}
-
-#caller-name {
-  margin: 0 0 2px;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  color: var(--text);
-}
-
-#caller-phone {
-  margin: 0;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-variant-numeric: tabular-nums;
-  font-size: 12.5px;
-  color: var(--text-2);
-}
-
-#call-state-text {
-  margin: 12px 0 2px;
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
-
-#call-timer {
-  margin: 2px 0 0;
-  font-variant-numeric: tabular-nums;
-  font-size: 28px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  color: var(--text);
-}
-
-/* ---------- contact card ---------------------------------------------------- */
-
-.contact-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 9px 11px;
-  margin-bottom: 12px;
-  border: 1px solid var(--orange-line);
-  border-left: 3px solid var(--orange-500);
-  border-radius: var(--r);
-  background: var(--orange-soft);
-  text-align: left;
-}
-
-.contact-details {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.contact-label {
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--text-3);
-}
-
-.contact-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.view-profile-btn {
-  flex: none;
-  padding: 3px 8px;
-  border: none;
-  border-radius: 6px;
-  background: none;
-  font-family: inherit;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--orange-500);
-  cursor: pointer;
-}
-
-.view-profile-btn:hover {
-  background: var(--orange-soft);
-}
-
-/* ---------- notices --------------------------------------------------------- */
-
-.notice {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 10px;
-  margin-bottom: 12px;
-  border-radius: var(--r);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.notice svg {
-  flex: none;
-}
-
-.notice-success {
-  background: var(--ok-soft);
-  color: var(--ok);
-}
-
-/* ---------- call log --------------------------------------------------------- */
-
-.log-card {
-  padding-top: 12px;
-  margin-bottom: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.log-notes,
-textarea {
-  width: 100%;
-  height: auto;
-  min-height: 66px;
-  padding: 9px 11px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--r);
-  background: var(--sunken);
-  font-family: inherit;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--text);
-  resize: vertical;
-}
-
-textarea:focus {
-  outline: none;
-  border-color: var(--orange-500);
-  box-shadow: var(--ring);
-}
-
-.input-sm {
-  height: 34px;
-  font-size: 12.5px;
-}
