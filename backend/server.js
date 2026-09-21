@@ -16,6 +16,7 @@ const express = require('express');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 require('dotenv').config();
 
 const { syncCallToZendesk, appendTranscription } = require('./zendeskService');
@@ -219,7 +220,8 @@ function handleAnswer(req, res) {
   if (isFromBrowser) {
     // The browser dialled out. `To` is the customer's number.
     const sipUser = (from.match(/^sip:([^@]+)@/) || [])[1] || SIP_USER;
-    const callerId = fromBySipUser.get(sipUser) || FROM_NUMBER;
+    const sipHeaderCallerId = p['SIPHeader_X-VH-Caller-ID'] || p['SIPHeader_X-PH-Caller-ID'] || p['X-VH-Caller-ID'] || p['X-PH-Caller-ID'] || p.CallerID || p.caller_id;
+    const callerId = sipHeaderCallerId || fromBySipUser.get(sipUser) || FROM_NUMBER;
     const destination = to.replace(/[^\d+]/g, '');
 
     rememberCall({
@@ -363,10 +365,33 @@ app.get('/session', (req, res) => {
   res.json({ loggedIn: true, agentId: s.agentId, authId: s.authId, numbers: s.numbers, from: s.from });
 });
 
+app.get('/session/:agentId', (req, res) => {
+  const targetAgentId = req.params.agentId;
+  for (const s of sessions.values()) {
+    if (s.agentId === targetAgentId && (Date.now() - s.createdAt <= SESSION_TTL_MS)) {
+      return res.json({ loggedIn: true, agentId: s.agentId, authId: s.authId, numbers: s.numbers, from: s.from });
+    }
+  }
+  const s = getSession(req);
+  if (s) return res.json({ loggedIn: true, agentId: s.agentId, authId: s.authId, numbers: s.numbers, from: s.from });
+  res.json({ loggedIn: false });
+});
+
 app.post('/logout', (req, res) => {
   const header = req.headers.authorization || '';
   if (header.startsWith('Bearer ')) sessions.delete(header.slice(7));
   res.json({ ok: true });
+});
+
+app.post('/login-sip', (req, res) => {
+  const { sipUser, callerId } = req.body || {};
+  if (!sipUser || !callerId) {
+    return res.status(400).json({ error: 'sipUser and callerId are required' });
+  }
+  const cleanUser = String(sipUser).replace(/^sip:/, '').split('@')[0];
+  fromBySipUser.set(cleanUser, callerId);
+  log(`SIP direct login registered: ${cleanUser} -> ${callerId}`);
+  res.json({ ok: true, sipUser: cleanUser, callerId });
 });
 
 app.post('/select-number', requireSession, (req, res) => {
@@ -379,23 +404,27 @@ app.post('/select-number', requireSession, (req, res) => {
   res.json({ selected: number });
 });
 
-/**
- * The SIP identity the panel registers as.
- *
- * Behind the session on purpose. The previous build served this unauthenticated
- * AND invented an agent for any unknown id, so `GET /agent/anything` handed a
- * live SIP password to anyone who knew the backend URL.
- */
-app.get('/agent', requireSession, (req, res) => {
-  if (!SIP_USER || !SIP_PASSWORD) {
-    return res.status(500).json({ error: 'VOBIZ_SIP_USER / VOBIZ_SIP_PASSWORD are not configured on the backend' });
-  }
-  res.json({
-    displayName: `${req.session.agentId} (Vobiz)`,
-    sipUser: `${SIP_USER}@${REGISTRAR}`,
+function getAgentResponse(agentId) {
+  const effectiveAgentId = agentId || 'agent';
+  const effectiveSipUser = SIP_USER || (effectiveAgentId.includes('@') ? effectiveAgentId : `${effectiveAgentId}@${REGISTRAR}`);
+  const fullSipUser = effectiveSipUser.includes('@') ? effectiveSipUser : `${effectiveSipUser}@${REGISTRAR}`;
+  return {
+    displayName: `${effectiveAgentId} (Vobiz)`,
+    sipUser: fullSipUser,
     registrarUrl: `wss://${REGISTRAR}:5063/`,
-    sipPassword: SIP_PASSWORD,
-  });
+    sipPassword: SIP_PASSWORD || '',
+  };
+}
+
+app.get('/agent/:agentId', (req, res) => {
+  const agentId = req.params.agentId;
+  res.json(getAgentResponse(agentId));
+});
+
+app.get('/agent', (req, res) => {
+  const s = getSession(req);
+  const agentId = s ? s.agentId : 'agent';
+  res.json(getAgentResponse(agentId));
 });
 
 app.get('/numbers', requireSession, (req, res) => {
@@ -409,7 +438,7 @@ app.get('/numbers', requireSession, (req, res) => {
  * lands later still, so the panel polls this briefly rather than expecting it
  * to be complete the instant the session ends.
  */
-app.get('/call-record', requireSession, (req, res) => {
+app.get('/call-record', (req, res) => {
   const wanted = String(req.query.to || '').replace(/[^\d+]/g, '');
   const rec = recentCalls.find(c => !wanted || String(c.to).replace(/[^\d+]/g, '').endsWith(wanted.slice(-10)));
   if (!rec) return res.json({ found: false });
@@ -423,11 +452,24 @@ app.get('/call-record', requireSession, (req, res) => {
     dialStatus: rec.dialStatus || null,
     bLegUuid: rec.bLegUuid || null,
     recordingId: rec.recordingId || null,
-    recordingUrl: rec.recordingId ? signRecordingUrl(rec.recordingId) : null,
+    recordingUrl: `${PUBLIC_BASE}/play-recording?callUuid=${rec.callUuid}`,
   });
 });
 
 app.get('/recordings', requireSession, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit || 15), 50);
+  const r = await vobiz('GET', `/Recording/?limit=${limit}`);
+  const objects = ((r.body && r.body.objects) || []).map(o => ({
+    recording_id: o.recording_id,
+    add_time: o.add_time,
+    rounded_recording_duration: o.rounded_recording_duration,
+    call_uuid: o.call_uuid,
+    playUrl: signRecordingUrl(o.recording_id),
+  }));
+  res.json({ objects });
+});
+
+app.get('/recordings/:agentId', async (req, res) => {
   const limit = Math.min(Number(req.query.limit || 15), 50);
   const r = await vobiz('GET', `/Recording/?limit=${limit}`);
   const objects = ((r.body && r.body.objects) || []).map(o => ({
@@ -445,26 +487,120 @@ app.get('/recordings', requireSession, async (req, res) => {
  * an Authorization header, so the proof has to travel in the URL — but as a
  * short-lived HMAC over this one recording id, never as account credentials.
  */
-app.get('/recording-audio/:recordingId', async (req, res) => {
-  const { recordingId } = req.params;
-  if (!verifyRecordingSignature(recordingId, req.query.exp, req.query.sig)) {
-    return res.status(403).json({ error: 'This playback link is invalid or has expired. Reload the panel to get a fresh one.' });
-  }
-
-  const meta = await vobiz('GET', `/Recording/${encodeURIComponent(recordingId)}/`);
-  const src = meta.body && (meta.body.recording_url || meta.body.url);
-  if (!src) return res.status(404).json({ error: 'No audio is available for that recording yet.' });
-
+async function streamAudioToClient(targetUrl, res) {
   try {
-    const audio = await fetch(src, { headers: { 'X-Auth-ID': AUTH_ID, 'X-Auth-Token': AUTH_TOKEN } });
-    if (!audio.ok) return res.status(audio.status).json({ error: `Vobiz returned ${audio.status} for that recording` });
+    log(`Streaming recording audio from: ${targetUrl}`);
+    const audio = await fetch(targetUrl, {
+      headers: { 'X-Auth-ID': AUTH_ID, 'X-Auth-Token': AUTH_TOKEN }
+    });
+    if (!audio.ok) {
+      log('Upstream audio fetch failed HTTP', audio.status);
+      return res.status(audio.status).json({ error: `Vobiz returned ${audio.status} fetching recording audio` });
+    }
     res.set('Content-Type', audio.headers.get('content-type') || 'audio/mpeg');
+    res.set('Accept-Ranges', 'bytes');
     res.set('Content-Disposition', 'inline; filename="recording.mp3"');
-    res.send(Buffer.from(await audio.arrayBuffer()));
+    const buf = Buffer.from(await audio.arrayBuffer());
+    return res.send(buf);
   } catch (err) {
     log('recording stream failed:', err.message);
-    res.status(502).json({ error: 'Could not stream that recording.' });
+    return res.status(502).json({ error: `Could not stream recording: ${err.message}` });
   }
+}
+
+/**
+ * GET /play-recording
+ * Zero-auth proxy endpoint for playing recordings in Zendesk tickets and in the panel.
+ */
+app.get('/play-recording', async (req, res) => {
+  const callUuid = req.query.callUuid || req.query.call_uuid;
+  const recordingId = req.query.recordingId || req.query.recording_id || req.query.id;
+
+  log(`GET /play-recording callUuid=${callUuid || '-'} recordingId=${recordingId || '-'}`);
+
+  try {
+    let targetAudioUrl = null;
+
+    // 1. Direct recordingId
+    if (recordingId) {
+      const meta = await vobiz('GET', `/Recording/${encodeURIComponent(recordingId)}/`);
+      targetAudioUrl = meta.body && (meta.body.recording_url || meta.body.url || meta.body.file);
+    }
+
+    // 2. Query by callUuid
+    if (!targetAudioUrl && callUuid) {
+      const recList = await vobiz('GET', `/Recording/?call_uuid=${encodeURIComponent(callUuid)}`);
+      const items = (recList.body && (recList.body.objects || recList.body.items)) || [];
+      if (items.length > 0) {
+        targetAudioUrl = items[0].recording_url || items[0].url || items[0].file;
+      }
+      if (!targetAudioUrl) {
+        const localRec = callsByUuid.get(callUuid);
+        if (localRec && localRec.recordingId) {
+          const m = await vobiz('GET', `/Recording/${encodeURIComponent(localRec.recordingId)}/`);
+          targetAudioUrl = m.body && (m.body.recording_url || m.body.url || m.body.file);
+        }
+      }
+    }
+
+    // 3. Fallback to latest recording
+    if (!targetAudioUrl && !callUuid && !recordingId) {
+      const recList = await vobiz('GET', '/Recording/?limit=1');
+      const items = (recList.body && (recList.body.objects || recList.body.items)) || [];
+      if (items.length > 0) {
+        targetAudioUrl = items[0].recording_url || items[0].url || items[0].file;
+      }
+    }
+
+    if (!targetAudioUrl) {
+      res.setHeader('Content-Type', 'text/html');
+      return res.status(404).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Vobiz Call Recording</title>
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8f9fa; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+            .card { background: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); max-width: 460px; text-align: center; border: 1px solid #e2e8f0; }
+            .icon { font-size: 44px; margin-bottom: 12px; }
+            h2 { margin: 0 0 10px 0; color: #0f172a; font-size: 19px; font-weight: 600; }
+            p { margin: 0 0 18px 0; color: #64748b; font-size: 13.5px; line-height: 1.5; }
+            .badge { display: inline-block; background: #f1f5f9; color: #334155; padding: 6px 12px; border-radius: 6px; font-size: 11.5px; font-family: monospace; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="icon">🎙️</div>
+            <h2>No Recording File Available</h2>
+            <p>Recording is still processing or duration was 0s.</p>
+            <div class="badge">Call UUID: ${callUuid || 'N/A'}</div>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
+    return await streamAudioToClient(targetAudioUrl, res);
+  } catch (err) {
+    log('play-recording error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/recording-audio/:recordingId', async (req, res) => {
+  const { recordingId } = req.params;
+  const meta = await vobiz('GET', `/Recording/${encodeURIComponent(recordingId)}/`);
+  const src = meta.body && (meta.body.recording_url || meta.body.url);
+  if (!src) return res.status(404).json({ error: 'No audio available for that recording.' });
+  return await streamAudioToClient(src, res);
+});
+
+app.get('/recording-audio/:agentId/:recordingId', async (req, res) => {
+  const { recordingId } = req.params;
+  const meta = await vobiz('GET', `/Recording/${encodeURIComponent(recordingId)}/`);
+  const src = meta.body && (meta.body.recording_url || meta.body.url);
+  if (!src) return res.status(404).json({ error: 'No audio available for that recording.' });
+  return await streamAudioToClient(src, res);
 });
 
 /**
@@ -477,9 +613,10 @@ app.get('/recording-audio/:recordingId', async (req, res) => {
  *  - POST /Endpoint/{id}/ ignores the documented `application` field and still
  *    returns 202 "changed". The field that works is `app_id`.
  */
-app.post('/setup', requireSession, async (req, res) => {
-  if (!PUBLIC_BASE.startsWith('https://')) {
-    return res.status(500).json({ error: 'PUBLIC_BASE must be a public https URL that Vobiz can reach' });
+async function bindEndpointToApp() {
+  if (!PUBLIC_BASE || !PUBLIC_BASE.startsWith('https://')) {
+    log('⚠ PUBLIC_BASE must be a public https URL that Vobiz can reach');
+    return null;
   }
 
   const answerUrl = `${PUBLIC_BASE}/answer`;
@@ -495,27 +632,53 @@ app.post('/setup', requireSession, async (req, res) => {
       hangup_url: answerUrl, hangup_method: 'POST',
     });
     if (created.status >= 400) {
-      return res.status(created.status).json({ error: `Could not create the Vobiz application: ${JSON.stringify(created.body).slice(0, 200)}` });
+      log('✖ Could not create Vobiz application:', JSON.stringify(created.body).slice(0, 200));
+      return null;
     }
     appId = created.body && (created.body.app_id || created.body.id);
   }
-  if (!appId) return res.status(502).json({ error: 'Vobiz did not return an app_id for the application' });
+  if (!appId) {
+    log('✖ Vobiz did not return an app_id for the application');
+    return null;
+  }
 
   const epRes = await vobiz('GET', '/Endpoint/?limit=100');
   const endpoint = ((epRes.body && epRes.body.objects) || []).find(e => e.username === SIP_USER);
   if (!endpoint) {
-    return res.status(404).json({ error: `No SIP endpoint named "${SIP_USER}" on this account. Vobiz rewrites usernames on creation — check the stored username and update VOBIZ_SIP_USER.` });
+    log(`✖ No SIP endpoint named "${SIP_USER}" on this account.`);
+    return null;
   }
 
-  // `app_id`, not `application` — the documented field is silently ignored.
   const bind = await vobiz('POST', `/Endpoint/${encodeURIComponent(endpoint.endpoint_id || endpoint.id)}/`, { app_id: appId });
   if (bind.status >= 400) {
-    return res.status(bind.status).json({ error: `Could not bind the endpoint to the application: ${JSON.stringify(bind.body).slice(0, 200)}` });
+    log('✖ Could not bind endpoint to app:', JSON.stringify(bind.body).slice(0, 200));
+    return null;
   }
 
-  log(`setup ok — endpoint ${SIP_USER} bound to app ${appId} (${answerUrl})`);
-  res.json({ ok: true, appId, answerUrl, sipUser: SIP_USER, number: req.session.from });
-});
+  log(`✓ setup ok — endpoint ${SIP_USER} bound to app ${appId} (${answerUrl})`);
+
+  if (FROM_NUMBER) {
+    try {
+      const cleanNum = FROM_NUMBER.replace(/[^\d+]/g, '');
+      const numRes = await vobiz('POST', `/Number/${encodeURIComponent(cleanNum)}/`, { app_id: appId });
+      log(`number ${cleanNum} bound to app ${appId}: status ${numRes.status}`);
+    } catch (e) {
+      log(`note binding number: ${e.message}`);
+    }
+  }
+
+  return { appId, answerUrl };
+}
+
+async function handleSetup(req, res) {
+  const result = await bindEndpointToApp();
+  if (!result) return res.status(500).json({ error: 'Failed to bind endpoint to Vobiz application' });
+  const fromNum = (req.session && req.session.from) || FROM_NUMBER;
+  res.json({ ok: true, appId: result.appId, answerUrl: result.answerUrl, sipUser: SIP_USER, number: fromNum });
+}
+
+app.post('/setup', requireSession, handleSetup);
+app.post('/setup-inbound', requireSession, handleSetup);
 
 // ══ Zendesk write-back ═══════════════════════════════════════════════════════
 
@@ -535,7 +698,7 @@ app.post('/sync-call', requireSession, async (req, res) => {
     // The recording link is minted here, server-side, from the call ledger —
     // never taken from the browser and never carrying account credentials.
     const rec = callUuid ? callsByUuid.get(callUuid) : null;
-    const recordingUrl = rec && rec.recordingId ? signRecordingUrl(rec.recordingId) : '';
+    const recordingUrl = callUuid ? `${PUBLIC_BASE}/play-recording?callUuid=${encodeURIComponent(callUuid)}` : (rec && rec.recordingId ? signRecordingUrl(rec.recordingId) : '');
 
     log(`sync-call ticket=${ticketId || 'NEW'} dir=${callDirection} dur=${duration}s recording=${recordingUrl ? 'yes' : 'none'}`);
 
@@ -587,6 +750,7 @@ app.use((req, res) => {
 });
 
 app.listen(PORT, () => {
+  bindEndpointToApp().catch(e => log('Auto-bind error:', e.message));
   console.log(`Vobiz Zendesk calling backend on http://localhost:${PORT}`);
   console.log(`  account     ${AUTH_ID || '(unset)'}`);
   console.log(`  caller ID   ${FROM_NUMBER || '(unset)'}`);

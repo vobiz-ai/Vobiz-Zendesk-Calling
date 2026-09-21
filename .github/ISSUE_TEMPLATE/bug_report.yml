@@ -65,5 +65,5 @@ body:
     id: logs
     attributes:
       label: Backend log and browser console
-      description: Lines beginning `[VoBiz` are the useful ones. Redact anything sensitive.
+      description: Lines beginning `[Vobiz` are the useful ones. Redact anything sensitive.
       render: text

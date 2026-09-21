@@ -81,7 +81,7 @@ async function syncCallToZendesk({
           recording_url: recordingUrl || '',
           started_at: startedAt,
           call_duration: callDurationSec,
-          body: notes ? `[VoBiz ${callDirection} Call]\n${notes}` : `[VoBiz ${callDirection} Call]`
+          body: notes ? `[Vobiz ${callDirection} Call]\n${notes}` : `[Vobiz ${callDirection} Call]`
         }
       };
 
@@ -112,7 +112,7 @@ async function syncCallToZendesk({
       const voiceTicketBody = {
         display_to_agent: 1,
         ticket: {
-          subject: `VoBiz ${callDirection} Call with ${fromNumber || toNumber || 'Customer'}`,
+          subject: `Vobiz ${callDirection} Call with ${fromNumber || toNumber || 'Customer'}`,
           type: 'task',
           status: 'solved',
           requester_id: requesterId ? parseInt(requesterId, 10) : null
@@ -123,7 +123,7 @@ async function syncCallToZendesk({
           recording_url: recordingUrl || '',
           started_at: startedAt,
           call_duration: callDurationSec,
-          body: notes ? `[VoBiz ${callDirection} Call]\n${notes}` : `[VoBiz ${callDirection} Call]`
+          body: notes ? `[Vobiz ${callDirection} Call]\n${notes}` : `[Vobiz ${callDirection} Call]`
         }
       };
 
@@ -153,7 +153,7 @@ async function syncCallToZendesk({
   const formattedMinutes = String(Math.floor(callDurationSec / 60)).padStart(2, '0');
   const formattedSeconds = String(callDurationSec % 60).padStart(2, '0');
 
-  const logBody = `[VoBiz Call Log]\n` +
+  const logBody = `[Vobiz Call Log]\n` +
                   `Date: ${new Date().toLocaleString()}\n` +
                   `Direction: ${callDirection}\n` +
                   `From: ${fromNumber || 'N/A'}\n` +
@@ -211,7 +211,7 @@ async function syncCallToZendesk({
 }
 
 /**
- * Appends full VoBiz / Vapi conversation transcript into Zendesk ticket as a private internal note
+ * Appends full Vobiz / Vapi conversation transcript into Zendesk ticket as a private internal note
  */
 async function appendTranscription({
   subdomain,
@@ -235,7 +235,7 @@ async function appendTranscription({
   }
 
   const updateUrl = `https://${subdomain}.zendesk.com/api/v2/tickets/${ticketId}.json`;
-  const transcriptBody = `[VoBiz AI Conversation Transcript${callId ? ` - Call #${callId}` : ''}]\n\n${transcript}`;
+  const transcriptBody = `[Vobiz AI Conversation Transcript${callId ? ` - Call #${callId}` : ''}]\n\n${transcript}`;
 
   console.log(`[Zendesk Service] Appending AI transcript to Zendesk ticket #${ticketId}`);
 
