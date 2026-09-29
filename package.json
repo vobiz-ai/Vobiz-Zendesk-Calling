@@ -14,7 +14,8 @@
     "start": "node backend/server.js",
     "lint": "node scripts/lint.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
-    "validate:app": "zcli apps:validate ./zendesk-app",
+    "validate:app": "zcli apps:validate .",
+    "package": "node scripts/package.mjs",
     "tunnel": "cloudflared tunnel --url http://localhost:8092",
     "bootstrap": "node backend/bootstrap.js"
   },

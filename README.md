@@ -84,7 +84,6 @@ npm start                              # → http://localhost:8092
 cloudflared tunnel --url http://localhost:8092
 
 # 3. the Zendesk app
-cd ../zendesk-app
 cp zcli.apps.config.json.example zcli.apps.config.json   # paste the tunnel URL
 npx @zendesk/zcli apps:server
 ```
@@ -105,10 +104,10 @@ SIP endpoints: **[docs/install.md](docs/install.md)**.
 | `backend/server.js` | The bridge: call control, the Vobiz answer webhook, the recording proxy |
 | `backend/zendeskService.js` | Writes call logs and transcripts into Zendesk |
 | `backend/agents.json.example` | Template mapping agent identities to SIP endpoints |
-| `zendesk-app/manifest.json` | ZAF v2 manifest — three locations, five settings |
-| `zendesk-app/assets/index.html` | The softphone UI (`top_bar`) |
-| `zendesk-app/assets/sidebar.html` | Resolves which ticket is open (`ticket_sidebar`) |
-| `zendesk-app/assets/background.html` | Relays Zendesk's `voice.dialout` click-to-dial |
+| `manifest.json` | ZAF v2 manifest — three locations, three settings |
+| `assets/index.html` | The softphone UI (`top_bar`) |
+| `assets/sidebar.html` | Resolves which ticket is open (`ticket_sidebar`) |
+| `assets/background.html` | Relays Zendesk's `voice.dialout` click-to-dial |
 | `docs/` | Install, architecture, backend contract, testing |
 
 ## Configuration

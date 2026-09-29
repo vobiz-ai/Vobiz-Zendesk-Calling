@@ -3,8 +3,8 @@
 .env.*
 !.env.example
 backend/.env
-zendesk-app/zcli.apps.config.json
-zendesk-app/settings.json
+zcli.apps.config.json
+settings.json
 
 # Runtime state
 backend/tunnel-url.txt
@@ -12,7 +12,7 @@ tunnel-url.txt
 *.log
 
 # Build output
-zendesk-app/tmp/
+tmp/
 dist/
 *.zip
 

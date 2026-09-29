@@ -28,12 +28,12 @@ const SKIP_FILES = [
   // matches the "long random-looking string" rule on almost every line. Same
   // reasoning as package-lock.json below: noise here trains people to ignore
   // real hits.
-  /(^|\/)assets\/lib\//,
-  /(^|\/)\.env$/,
-  /(^|\/)\.env\..*$/,
-  /(^|\/)agents\.json$/,
-  /(^|\/)zcli\.apps\.config\.json$/,
-  /(^|\/)package-lock\.json$/,
+  /(^|[/\\])assets[/\\]lib[/\\]/,
+  /(^|[/\\])\.env$/,
+  /(^|[/\\])\.env\..*$/,
+  /(^|[/\\])agents\.json$/,
+  /(^|[/\\])zcli\.apps\.config\.json$/,
+  /(^|[/\\])package-lock\.json$/,
 ];
 
 const RULES = [

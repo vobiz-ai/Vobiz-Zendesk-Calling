@@ -35,7 +35,7 @@ jobs:
           set -e
           fail=0
           # These carry secrets and must never be committed.
-          for f in backend/.env zendesk-app/zcli.apps.config.json; do
+          for f in backend/.env zcli.apps.config.json; do
             if ! git check-ignore -q "$f"; then
               echo "::error::$f is NOT gitignored — it holds credentials"
               fail=1
@@ -63,13 +63,13 @@ jobs:
       - name: Manifest declares what the app actually reads
         run: |
           node -e '
-            const m = require("./zendesk-app/manifest.json");
+            const m = require("./manifest.json");
             const fs = require("node:fs");
             let fail = false;
 
             // Every location must point at a file that exists.
             for (const [name, loc] of Object.entries(m.location.support)) {
-              const p = "zendesk-app/" + loc.url;
+              const p = loc.url;
               if (!fs.existsSync(p)) {
                 console.error(`FAIL  location ${name} → missing ${loc.url}`);
                 fail = true;
@@ -81,7 +81,7 @@ jobs:
             // A setting the app reads but the manifest does not declare is
             // always undefined at runtime. That bug shipped once already.
             const declared = new Set(m.parameters.map(p => p.name));
-            const app = fs.readFileSync("zendesk-app/assets/scripts/app.js", "utf8");
+            const app = fs.readFileSync("assets/scripts/app.js", "utf8");
 
             // Matches both `metadata.settings.x` and the destructured form
             // `settings.x`, so refactoring how the object is obtained does not
