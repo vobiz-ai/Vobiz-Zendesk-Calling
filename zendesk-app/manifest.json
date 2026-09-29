@@ -12,13 +12,19 @@
     "support": {
       "top_bar": {
         "url": "assets/index.html",
-        "size": { "width": "340px", "height": "560px" },
+        "size": {
+          "width": "340px",
+          "height": "560px"
+        },
         "preloadPane": true,
         "autoHide": false
       },
       "ticket_sidebar": {
         "url": "assets/sidebar.html",
-        "size": { "width": "100%", "height": "140px" }
+        "size": {
+          "height": "140px"
+        },
+        "flexible": true
       },
       "background": {
         "url": "assets/background.html"
