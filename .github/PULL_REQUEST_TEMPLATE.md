@@ -8,7 +8,7 @@
 
 - [ ] `npm run lint` passes
 - [ ] `npm run check:secrets` passes
-- [ ] `zcli apps:validate ./zendesk-app` passes
+- [ ] `npm run validate:app` (`zcli apps:validate .`) passes
 - [ ] Tested against a real Zendesk account and a real call, or explained why not
 
 ## Checklist
@@ -17,4 +17,4 @@
 - [ ] `docs/backend-contract.md` updated if a route changed
 - [ ] `CHANGELOG.md` updated, describing the symptom a user would have seen
 - [ ] No credentials, SIP passwords, tunnel hostnames, or real phone numbers in the diff
-- [ ] Anything interpolated into the VXML response goes through `escapeXml`
+- [ ] Anything interpolated into the VXML response goes through `xmlEscape`

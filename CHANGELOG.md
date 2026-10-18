@@ -5,6 +5,13 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Documentation
+- README rewritten for customers: requirements, quick start, both sign-in
+  modes, call logging, configuration reference, production deployment,
+  security, troubleshooting and limitations. `docs/install.md` and
+  `docs/testing.md` are folded into it; internal planning notes
+  (`ISSUES.md`, `MARKETPLACE.md`) are removed.
+
 ### Any Vobiz account can sign in
 - No Vobiz Auth ID, Auth Token, SIP credentials or caller ID in `.env` any more.
   Sign-in verifies the pair with Vobiz, then finds or creates this

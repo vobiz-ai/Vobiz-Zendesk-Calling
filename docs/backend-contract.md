@@ -106,7 +106,7 @@ Records `sipUser → caller ID`; that number is also the inbound number that
 rings this agent. 400 unless `callerId` is a plain E.164 number; 409 if the SIP
 user is an endpoint signed in through an account. Ownership is enforced by
 Vobiz itself at dial time. The endpoint and DID must already be on an
-application whose answer URL is this backend (see install docs).
+application whose answer URL is this backend (see the README, "SIP direct").
 
 ### `GET /agent` — **session**
 

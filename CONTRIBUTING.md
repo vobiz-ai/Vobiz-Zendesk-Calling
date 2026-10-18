@@ -5,7 +5,7 @@ three-location ZAF app — so most changes are quick to make and quick to review
 
 ## Getting set up
 
-Full walkthrough in [docs/install.md](docs/install.md). The short version:
+Full walkthrough in the [README](README.md#quick-start). The short version:
 
 ```bash
 cd backend && npm install
