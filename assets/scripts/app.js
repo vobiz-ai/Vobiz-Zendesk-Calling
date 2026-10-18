@@ -235,7 +235,10 @@ async function sipDirectConnect() {
     return;
   }
 
-  writeStore(SIP_CREDS_KEY, remember ? { username, password, callerId } : null);
+  // Remember the username and caller ID only. The SIP password is a live
+  // credential; localStorage is readable by any script in this origin and
+  // survives logout, so it is typed per session and never stored.
+  writeStore(SIP_CREDS_KEY, remember ? { username, callerId } : null);
 
   const cleanUsername = username.includes("@") ? username.split("@")[0] : username;
   const sipUser = `${cleanUsername}@${REGISTRAR_HOST}`;
@@ -263,13 +266,12 @@ function restoreAuthMode() {
   if (!saved || !saved.username) return;
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ""; };
   set("sip-username", saved.username);
-  set("sip-password", saved.password);
   set("sip-caller-id", saved.callerId);
   const box = document.getElementById("sip-remember");
   if (box) box.checked = true;
-  if (saved.password && saved.callerId) {
-    sipDirectConnect();
-  }
+  // Older builds stored the password here; drop it if it is still around.
+  if (saved.password) writeStore(SIP_CREDS_KEY, { username: saved.username, callerId: saved.callerId });
+  setLoginStatus("Enter the SIP password to connect.");
 }
 
 // ─── session & auth ──────────────────────────────────────────────────────────
@@ -277,7 +279,7 @@ function restoreAuthMode() {
 async function restoreVobizSession() {
   sessionToken = sessionStorage.getItem("vobiz_session_token") || "";
   try {
-    const res = await backendFetch(`/session/${encodeURIComponent(agentId)}`);
+    const res = await backendFetch("/session");
     const session = await res.json().catch(() => ({}));
     if (session.loggedIn) {
       try { await backendJson("/setup", { method: "POST" }); } catch (e) { console.warn("[Vobiz] setup note:", e); }
@@ -287,12 +289,16 @@ async function restoreVobizSession() {
       loadCallHistory();
       initVobizSip();
     } else {
+      // No session yet: the SIP identity is behind the session, so there is
+      // nothing to register with until the agent signs in.
+      sessionStorage.removeItem("vobiz_session_token");
+      sessionToken = "";
       setDialEnabled(false);
-      initVobizSip();
+      setStatus("Sign in to start calling", "pending");
     }
   } catch (err) {
     console.warn("[Vobiz] Could not check login session:", err);
-    initVobizSip();
+    setStatus("Cannot reach the calling backend — check the Backend URL in this app's settings.", "error");
   }
 }
 
@@ -465,7 +471,7 @@ async function loadCallHistory() {
   historyList.innerHTML = `<li class="history-empty">Loading recent recordings…</li>`;
   try {
     const data = await backendJson("/recordings?limit=10");
-    const recordings = (data && data.recordings) || [];
+    const recordings = (data && data.objects) || [];
     if (!recordings.length) {
       historyList.innerHTML = `<li class="history-empty">No calls recorded yet. Completed calls with audio will appear here automatically.</li>`;
       return;
@@ -494,7 +500,8 @@ async function loadCallHistory() {
       audio.controls = true;
       audio.preload = "none";
       audio.className = "history-audio";
-      audio.src = `${backendUrl}/play-recording?callUuid=${encodeURIComponent(rec.call_uuid)}`;
+      // Signed, short-lived link minted by the backend. Never build one here.
+      audio.src = rec.playUrl;
 
       li.appendChild(topRow);
       li.appendChild(audio);
@@ -546,19 +553,14 @@ async function initVobizSip() {
 
   let agent;
   try {
-    const res = await backendFetch(`/agent/${encodeURIComponent(agentId)}`);
+    const res = await backendFetch("/agent");
     if (!res.ok) {
-      // Fallback for session-based /agent
-      const resSession = await backendFetch("/agent");
-      if (resSession.ok) agent = await resSession.json();
-      else {
-        setStatus(`Could not load the identity "${agentId}" — check this app's settings.`, "error");
-        setSipRegistered(false);
-        return;
-      }
-    } else {
-      agent = await res.json();
+      const body = await res.json().catch(() => ({}));
+      setStatus(res.status === 401 ? "Sign in to start calling" : `Could not load the SIP identity — ${body.error || res.status}`, res.status === 401 ? "pending" : "error");
+      setSipRegistered(false);
+      return;
     }
+    agent = await res.json();
   } catch (err) {
     console.error("[Vobiz] Could not reach calling backend:", err);
     setStatus("Cannot reach the calling backend — check the Backend URL in this app's settings.", "error");
@@ -720,6 +722,9 @@ function startSipUA(sipUser, sipPassword, displayName) {
 
       const remoteCaller = (data.session && data.session.remote_identity && data.session.remote_identity.uri && data.session.remote_identity.uri.user) || "Unknown caller";
       callDirection = "Inbound";
+      lastDialedNumber = remoteCaller;
+      lastCallRecord = null;
+      activeTicketId = null;
       currentRTCSession = data.session;
       incomingPending = true;
 
@@ -941,7 +946,9 @@ async function autoLogCallToZendesk() {
   try {
     const recData = await backendJson(`/call-record?to=${encodeURIComponent(lastDialedNumber)}`);
     if (recData && recData.found && recData.callUuid) {
-      recordingUrl = recData.recordingUrl || `${backendUrl}/play-recording?callUuid=${recData.callUuid}`;
+      lastCallRecord = recData;
+      // Signed and expiring. If the backend did not mint one, write no link.
+      recordingUrl = recData.recordingUrl || "";
     }
   } catch (e) {
     console.warn("[Vobiz] call-record fetch note:", e.message);
@@ -970,6 +977,7 @@ async function autoLogCallToZendesk() {
         callDirection,
         notes: `Call with ${customerName} (${lastDialedNumber})`,
         requesterId: resolvedUser ? resolvedUser.id : null,
+        callUuid: lastCallRecord ? lastCallRecord.callUuid : null,
       }),
     });
     if (client) client.invoke("notify", "Call logged to Zendesk.");
