@@ -364,7 +364,12 @@ function setStatus(text, tone = "pending") {
       badge.textContent = "OFFLINE";
       badge.className = "status-badge is-error unregistered";
     } else {
-      badge.textContent = text.toUpperCase();
+      // The badge is a short state; the full sentence goes in the message line.
+      const short = /^sign in/i.test(text) ? "SIGNED OUT"
+        : /^incoming/i.test(text) ? "RINGING"
+        : text.length > 12 ? (tone === "busy" ? "ON CALL" : "CONNECTING")
+        : text.toUpperCase();
+      badge.textContent = short;
       badge.className = `status-badge is-${tone}`;
     }
   }
