@@ -49,7 +49,7 @@ const seenBodies = [];
 async function text(r) { const t = await r.text(); seenBodies.push(t); return t; }
 async function json(r) { return JSON.parse(await text(r)); }
 
-async function login(acct = ONE, agentId = 'priya') {
+async function login(acct = ONE, agentId = 'zd1001') {
   const r = await req('/login', jsonPost({ agentId, authId: acct.authId, authToken: acct.authToken }));
   const body = await json(r);
   assert.equal(r.status, 200, JSON.stringify(body));
@@ -82,7 +82,7 @@ test('boot does not touch any Vobiz account', () => {
 // ─── sign-in: any account ────────────────────────────────────────────────────
 test('login with a wrong token is refused with 401 and creates nothing', async () => {
   const mark = fetched().length;
-  const r = await req('/login', jsonPost({ agentId: 'x', authId: ONE.authId, authToken: 'wrong' }));
+  const r = await req('/login', jsonPost({ agentId: 'zd9', authId: ONE.authId, authToken: 'wrong' }));
   assert.equal(r.status, 401);
   assert.match((await json(r)).error, /did not accept/);
   const calls = fetched().slice(mark);
@@ -91,12 +91,12 @@ test('login with a wrong token is refused with 401 and creates nothing', async (
 });
 
 test('two different accounts both sign in and get distinct endpoints', async () => {
-  const a = await login(ONE, 'priya');
-  const b = await login(TWO, 'ravi');
+  const a = await login(ONE, 'zd1001');
+  const b = await login(TWO, 'zd1002');
   assert.equal(a.body.authId, 'MA_TEST0001');
   assert.equal(b.body.authId, 'MA_TEST0002');
   assert.notEqual(a.sipUser, b.sipUser);
-  assert.match(a.sipUser, /^zdpriya[0-9a-f]+1187694299$/, 'the username Vobiz stored, read back');
+  assert.match(a.sipUser, /^zd1001x[0-9a-f]+1187694299$/, 'the username Vobiz stored, read back');
   assert.deepEqual(a.body.numbers, ['+910000000001', '+910000000002']);
   assert.deepEqual(b.body.numbers, ['+910000000003']);
   assert.notEqual(a.agent.sipPassword, b.agent.sipPassword);
@@ -113,15 +113,15 @@ test('two different accounts both sign in and get distinct endpoints', async () 
   const file = path.join(DATA_DIR, 'endpoints.json');
   const stored = fs.readFileSync(file, 'utf8');
   const map = JSON.parse(stored);
-  assert.deepEqual(Object.keys(map).sort(), ['MA_TEST0001:priya', 'MA_TEST0002:ravi']);
-  assert.equal(map['MA_TEST0001:priya'].username, a.sipUser);
+  assert.deepEqual(Object.keys(map).sort(), ['MA_TEST0001:zd1001', 'MA_TEST0002:zd1002']);
+  assert.equal(map['MA_TEST0001:zd1001'].username, a.sipUser);
   for (const secret of [...TOKENS, a.agent.sipPassword, b.agent.sipPassword]) assert.ok(!stored.includes(secret));
   if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
 
 test('caller-ID list: every page of List Account Phone Numbers, active and voice-enabled only', async () => {
   const mark = fetched().length;
-  const a = await login(ONE, 'picker');
+  const a = await login(ONE, 'zd1004');
   const pages = fetched().slice(mark).filter(c => /\/numbers\?/.test(c.url)).map(c => new URL(c.url).searchParams.get('page'));
   assert.deepEqual(pages, ['1', '2'], 'paged until total was loaded');
   assert.deepEqual(a.body.numbers, ['+910000000001', '+910000000002']);
@@ -134,15 +134,64 @@ test('caller-ID list: every page of List Account Phone Numbers, active and voice
   }
   // The last pick is remembered for that agent's next sign-in.
   assert.equal((await req('/select-number', jsonPost({ number: '+910000000002' }, a.token))).status, 200);
-  const again = await login(ONE, 'picker');
+  const again = await login(ONE, 'zd1004');
   assert.equal(again.body.selected, '+910000000002');
   assert.equal((await json(await req('/session', bearer(again.token)))).from, '+910000000002');
 });
 
-test('signing in again reuses the endpoint and rotates its SIP password', async () => {
-  const first = await login(ONE, 'meera');
+// ─── one endpoint per Zendesk agent ──────────────────────────────────────────
+test('agentId must be zd<Zendesk user id>; anything else is refused before Vobiz is touched', async () => {
   const mark = fetched().length;
-  const second = await login(ONE, 'meera');
+  for (const agentId of [undefined, '', 'priya', 'zd', 'zd0', 'zd12a', 'ZD12', 'zd1/../2', 'zd1 ', 'zd123456789012345678901', 12]) {
+    const r = await req('/login', jsonPost({ agentId, authId: ONE.authId, authToken: ONE.authToken }));
+    assert.equal(r.status, 400, String(agentId));
+  }
+  assert.equal(fetched().length, mark, 'no Vobiz call for a malformed agentId');
+});
+
+test('two Zendesk agents on one account get separate endpoints, and one signing in leaves the other\'s password alone', async () => {
+  const a = await login(ONE, 'zd2001');
+  const mark = fetched().length;
+  const b = await login(ONE, 'zd2002');
+  assert.notEqual(a.sipUser, b.sipUser);
+  assert.match(a.sipUser, /^zd2001x/);
+  assert.match(b.sipUser, /^zd2002x/);
+  const aEndpoint = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'endpoints.json'), 'utf8'))['MA_TEST0001:zd2001'].endpointId;
+  const touchedA = fetched().slice(mark).filter(c => c.method === 'POST' && c.url.endsWith(`/Endpoint/${aEndpoint}/`));
+  assert.deepEqual(touchedA, [], 'B\'s sign-in must not rotate A\'s SIP password');
+  // A is still signed in, with the password it was given.
+  const again = await json(await req('/agent', bearer(a.token)));
+  assert.equal(again.sipPassword, a.agent.sipPassword);
+  assert.equal(again.sipUser.split('@')[0], a.sipUser);
+});
+
+test('a session token is bound to its agent: it cannot read or change another agent', async () => {
+  const a = await login(ONE, 'zd2003');
+  const b = await login(ONE, 'zd2004');
+  // Naming another agent in the body changes nothing: identity comes from the token.
+  await req('/select-number', jsonPost({ number: '+910000000002', agentId: 'zd2004' }, a.token));
+  assert.equal((await json(await req('/session', bearer(b.token)))).from, '+910000000001');
+  assert.equal((await json(await req('/session', bearer(a.token)))).agentId, 'zd2003');
+  assert.equal((await json(await req('/agent', bearer(a.token)))).sipUser.split('@')[0], a.sipUser);
+  // /login with A's token in the header and B's id still yields a separate B session, not A's.
+  const r = await json(await req('/login', jsonPost({ agentId: 'zd2004', authId: ONE.authId, authToken: ONE.authToken }, a.token)));
+  assert.notEqual(r.token, a.token);
+  assert.equal((await json(await req('/session', bearer(a.token)))).agentId, 'zd2003');
+});
+
+test('signing in again as the same agent ends the older session (its SIP password is dead)', async () => {
+  const first = await login(ONE, 'zd2005');
+  const second = await login(ONE, 'zd2005');
+  assert.deepEqual(await json(await req('/session', bearer(first.token))), { loggedIn: false });
+  assert.equal((await req('/agent', bearer(first.token))).status, 401);
+  assert.equal((await req('/numbers', bearer(first.token))).status, 401);
+  assert.equal((await json(await req('/session', bearer(second.token)))).loggedIn, true);
+});
+
+test('signing in again reuses the endpoint and rotates its SIP password', async () => {
+  const first = await login(ONE, 'zd1003');
+  const mark = fetched().length;
+  const second = await login(ONE, 'zd1003');
   assert.equal(second.sipUser, first.sipUser);
   assert.notEqual(second.agent.sipPassword, first.agent.sipPassword);
   const calls = fetched().slice(mark);
@@ -171,10 +220,10 @@ test('when app_id does not take, the bind is verified and retried with the exact
 });
 
 test('a lost endpoint map does not create a second endpoint: found again by alias', async () => {
-  const first = await login(TWO, 'alias-agent');
+  const first = await login(TWO, 'zd1005');
   fs.rmSync(path.join(DATA_DIR, 'endpoints.json'));
   const mark = fetched().length;
-  const again = await login(TWO, 'alias-agent');
+  const again = await login(TWO, 'zd1005');
   assert.equal(again.sipUser, first.sipUser);
   assert.ok(!fetched().slice(mark).some(c => c.url.endsWith('/Endpoint/') && c.method === 'POST'));
 });
@@ -195,7 +244,7 @@ test('GET /agent without a session is refused', async () => {
 
 test('/session/:agentId does not hand out session details by agent id', async () => {
   await login();
-  assert.equal((await req('/session/priya')).status, 404);
+  assert.equal((await req('/session/zd1001')).status, 404);
   assert.deepEqual(await json(await req('/session')), { loggedIn: false });
 });
 
@@ -218,13 +267,13 @@ test('SIP direct: X-VH-Caller-ID header on the INVITE sets the caller ID even wi
 });
 
 test('SIP direct cannot claim an endpoint signed in with an account', async () => {
-  const a = await login(ONE, 'claimed');
+  const a = await login(ONE, 'zd1006');
   const r = await req('/login-sip', jsonPost({ sipUser: a.sipUser, callerId: '+910000000062' }));
   assert.equal(r.status, 409);
 });
 
 test('account mode: the X-VH-Caller-ID header is honoured only for that account\'s own numbers', async () => {
-  const a = await login(ONE, 'hdracct');
+  const a = await login(ONE, 'zd1008');
   const own = await text(await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '910000000099', CallUUID: 'u-h1', 'X-VH-Caller-ID': '+910000000002' })));
   assert.match(own, /<Dial callerId="\+910000000002"/);
   const foreign = await text(await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '910000000099', CallUUID: 'u-h2', 'X-VH-Caller-ID': '+910000000003' })));
@@ -233,8 +282,8 @@ test('account mode: the X-VH-Caller-ID header is honoured only for that account\
 
 // ─── webhooks route to the right account ─────────────────────────────────────
 test('outbound answer: identified by SIP user, dials with that account\'s chosen caller ID', async () => {
-  const a = await login(ONE, 'outa');
-  const b = await login(TWO, 'outb');
+  const a = await login(ONE, 'zd1015');
+  const b = await login(TWO, 'zd1016');
   assert.equal((await req('/select-number', jsonPost({ number: '+910000000002' }, a.token))).status, 200);
   assert.equal((await req('/select-number', jsonPost({ number: '+910000000001' }, b.token))).status, 400, 'not account two\'s number');
 
@@ -254,9 +303,9 @@ test('outbound from an unknown SIP user is hung up, not dialled', async () => {
 });
 
 test('inbound answer: rings the signed-in agents of the account that owns the DID', async () => {
-  const a1 = await login(ONE, 'inbound1');
-  const a2 = await login(ONE, 'inbound2');
-  const b = await login(TWO, 'inbound3');
+  const a1 = await login(ONE, 'zd1010');
+  const a2 = await login(ONE, 'zd1011');
+  const b = await login(TWO, 'zd1012');
 
   const x1 = await text(await req('/answer', form({ From: '910000000097', To: '910000000001', CallUUID: 'u-in-1' })));
   assert.match(x1, /<Dial callerId="\+910000000001" callerName="910000000097"/);
@@ -271,7 +320,7 @@ test('inbound answer: rings the signed-in agents of the account that owns the DI
 });
 
 test('inbound: ParentAuthID picks the account, ahead of the dialled-number map', async () => {
-  const b = await login(TWO, 'parent');
+  const b = await login(TWO, 'zd1017');
   // To is a number account TWO never listed, so only ParentAuthID can route it.
   const xml = await text(await req('/answer', form({ From: '910000000097', To: '00000000099', CallUUID: 'u-pa', Direction: 'inbound', ParentAuthID: 'MA_TEST0002' })));
   assert.ok(xml.includes(`<User>sip:${b.sipUser}@registrar.vobiz.ai</User>`));
@@ -291,7 +340,7 @@ test('Event=Hangup gets an empty Response', async () => {
 });
 
 test('a caller ID cannot inject XML into the answer document', async () => {
-  const a = await login(ONE, 'inject');
+  const a = await login(ONE, 'zd1013');
   const evil = '+1"/><Number>19005550100</Number></Dial><Dial callerId="+1';
   assert.equal((await req('/select-number', jsonPost({ number: evil }, a.token))).status, 400);
   assert.equal((await req('/login-sip', jsonPost({ sipUser: 'deskphone03', callerId: evil }))).status, 400);
@@ -303,7 +352,7 @@ test('a caller ID cannot inject XML into the answer document', async () => {
 });
 
 test('a destination that is not a phone number is rejected, not dialled', async () => {
-  const a = await login(ONE, 'dest');
+  const a = await login(ONE, 'zd1007');
   const xml = await text(await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '</Number><Number>1900', CallUUID: 'u-y' })));
   assert.match(xml, /<Hangup reason="rejected"\/>/);
 });
@@ -331,9 +380,22 @@ test('no proxy route takes a caller-supplied URL', async () => {
   assert.equal((await req('/recording-file?url=https://example.com/')).status, 404);
 });
 
+test('recordings list shows only calls this backend handled for the account, not the whole account', async () => {
+  const a = await login(ONE, 'zd2006');
+  // Nothing handled yet for this account: the foreign recording is not shown.
+  assert.deepEqual((await json(await req('/recordings', bearer(a.token)))).objects, []);
+  await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '910000000091', CallUUID: 'call-1' }));
+  const list = await json(await req('/recordings', bearer(a.token)));
+  assert.deepEqual(list.objects.map(o => o.recording_id), ['rec-1']);
+  // The other account's ledger does not leak into this one.
+  const b = await login(TWO, 'zd2007');
+  assert.deepEqual((await json(await req('/recordings', bearer(b.token)))).objects, []);
+});
+
 test('signed panel links are account-scoped: each plays its own audio, swapping the account breaks it', async () => {
-  const a = await login(ONE, 'rec1');
-  const b = await login(TWO, 'rec2');
+  const a = await login(ONE, 'zd1018');
+  const b = await login(TWO, 'zd1019');
+  await req('/answer', form({ From: `sip:${b.sipUser}@registrar.vobiz.ai`, To: '910000000092', CallUUID: 'call-2' }));
   const la = await json(await req('/recordings', bearer(a.token)));
   const lb = await json(await req('/recordings', bearer(b.token)));
   const ua = new URL(la.objects[0].playUrl);
@@ -357,7 +419,7 @@ test('signed panel links are account-scoped: each plays its own audio, swapping 
 });
 
 test('ticket link is signed over the account, credential-free, and plays only that call', async () => {
-  const a = await login(ONE, 'ticket');
+  const a = await login(ONE, 'zd1021');
   await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '910000000091', CallUUID: 'call-1' }));
   const rec = await json(await req('/call-record?to=910000000091', bearer(a.token)));
   assert.equal(rec.callUuid, 'call-1');
@@ -374,7 +436,7 @@ test('ticket link is signed over the account, credential-free, and plays only th
 });
 
 test('another account cannot see this account\'s call records', async () => {
-  const b = await login(TWO, 'snoop');
+  const b = await login(TWO, 'zd1020');
   const rec = await json(await req('/call-record?to=910000000091', bearer(b.token)));
   assert.equal(rec.found, false);
 });
@@ -408,7 +470,7 @@ test('CORS: ZAF iframe origin allowed, others not echoed, never *', async () => 
 
 // ─── inbound setup ───────────────────────────────────────────────────────────
 test('/setup-inbound attaches the selected number to the account\'s app via the documented route', async () => {
-  const a = await login(ONE, 'inb');
+  const a = await login(ONE, 'zd1009');
   await req('/select-number', jsonPost({ number: '+910000000002' }, a.token));
   const mark = fetched().length;
   const r = await req('/setup-inbound', jsonPost({}, a.token));
@@ -439,7 +501,7 @@ test('static files are not served — no path traversal to .env', async () => {
 // ─── the account Auth Token never leaves the backend ─────────────────────────
 test('no HTTP response and no log line ever contains an account Auth Token', async () => {
   // A few more surfaces, so the check covers every route that returns data.
-  const a = await login(ONE, 'leak');
+  const a = await login(ONE, 'zd1014');
   for (const p of ['/session', '/numbers', '/agent', '/recordings', '/call-record', '/health']) {
     await text(await req(p, bearer(a.token)));
   }

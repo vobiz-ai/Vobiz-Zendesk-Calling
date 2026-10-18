@@ -5,6 +5,21 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### One endpoint per Zendesk agent
+- The `agent_id` app setting is removed. The panel identifies the agent as
+  `zd<Zendesk user id>` from ZAF `currentUser`, so agents sharing a Vobiz
+  account each get their own endpoint and no longer rotate each other's SIP
+  password. `POST /login` rejects any other `agentId` format, and a new sign-in
+  by the same agent ends that agent's older session. Endpoints created under
+  the old free-text ids are not reused.
+- The panel drops to SIGNED OUT and unregisters SIP when the backend answers
+  401 (or `/session` says signed out, checked every 60 s), e.g. after a backend
+  restart, instead of showing READY while calls are refused.
+- `GET /recordings` lists only recordings of calls this backend handled for the
+  account, not the account's latest recordings.
+- Panel text: the FAQ now says the browser places the call; click-to-dial on
+  phone numbers is described as Talk Partner Edition only.
+
 ### Documentation
 - README rewritten for customers: requirements, quick start, both sign-in
   modes, call logging, configuration reference, production deployment,
