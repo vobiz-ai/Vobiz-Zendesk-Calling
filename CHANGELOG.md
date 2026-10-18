@@ -5,6 +5,21 @@ All notable changes to this project are documented here. This project follows
 
 ## [Unreleased]
 
+### Any Vobiz account can sign in
+- No Vobiz Auth ID, Auth Token, SIP credentials or caller ID in `.env` any more.
+  Sign-in verifies the pair with Vobiz, then finds or creates this
+  integration's application and one SIP endpoint per agent in that account,
+  with a fresh SIP password per sign-in. `backend/bootstrap.js` and
+  `POST /setup` are removed.
+- Webhooks are multi-tenant: outbound by SIP username, inbound by
+  `ParentAuthID` (then the dialled number); inbound rings every signed-in agent
+  of that account.
+- The account-mode caller ID is a dropdown of the account's active voice
+  numbers (all pages); the backend refuses anything else. SIP direct keeps a
+  typed caller ID and now needs no backend account credentials.
+- Recording links are signed over the Auth ID and carry it, so they are
+  account-scoped.
+
 ### Security
 - `GET /agent` is behind the session again; `/agent/:agentId`, `/session/:agentId`,
   `/recordings/:agentId` and `/recording-audio/:agentId/:id` are removed. The
@@ -14,8 +29,7 @@ All notable changes to this project are documented here. This project follows
 - Zendesk credentials and subdomain come from `.env` only; a request could
   previously send the API token to a host of its choosing.
 - `/transcription-ready` is off unless `TRANSCRIPTION_WEBHOOK_SECRET` is set.
-- Caller IDs and destinations are validated and XML-escaped; SIP-direct caller
-  IDs must be owned by the account.
+- Caller IDs and destinations are validated and XML-escaped.
 - The panel no longer stores the SIP password in `localStorage`.
 
 ### Changed

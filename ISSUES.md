@@ -104,17 +104,25 @@ reaches the browser, and CORS is scoped to Zendesk origins.
 
 What remains:
 
-- **The backend is bound to one Vobiz account** through `.env`. Every agent who
-  signs in shares the same SIP endpoint, so two agents on the same install would
-  register as the same endpoint and race for calls. Real multi-agent use needs
-  an endpoint per agent and a real identity store.
+- **Fixed: the backend was bound to one Vobiz account** through `.env`. Any
+  account now signs in, and each agent gets its own endpoint, provisioned at
+  sign-in. What remains is that endpoints are keyed by the self-asserted
+  `agentId` (see below).
 - **`agentId` is still self-asserted.** It picks a label, not an identity. The
   session token is what actually authorises, which is correct, but any agent who
   knows the account's Auth ID and Token can mint one.
-- **SIP passwords are long-lived.** They should be short-lived credentials minted
-  per session.
-- **Auth tokens are compared in plaintext and held in memory.** Store hashed,
-  never log them, and put sessions somewhere that survives a restart.
+- **Fixed: SIP passwords were long-lived.** Each account sign-in now sets a
+  fresh random password on the agent's endpoint. A SIP-direct endpoint's
+  password is whatever its owner set.
+- **Auth Tokens are held in memory** (never logged, returned or written to
+  disk). A restart forgets them, signs everyone out, and makes recording links
+  answer "sign in again" until someone from that account does.
+- **SIP direct is unverified by design.** `/login-sip` cannot check that the
+  caller owns the SIP username or the number (there are no account
+  credentials); Vobiz enforces caller-ID ownership at dial time, and an
+  account-provisioned endpoint cannot be claimed this way. A SIP-direct claim
+  on a number does take inbound calls for that number when no signed-in account
+  owns it.
 
 The `backend-contract.md` security checklist in
 [`../Vobiz-Freshdesk-Calling/docs/backend-contract.md`](../Vobiz-Freshdesk-Calling/docs/backend-contract.md)

@@ -40,6 +40,8 @@ const RULES = [
   {
     name: "Vobiz auth ID",
     re: /\b(?:MA|SA)_[A-Z0-9]{8,}\b/g,
+    // Obvious test fakes used by backend/test.
+    allow: [/^MA_TEST\d{4}$/],
   },
   {
     name: "Vobiz auth token",
@@ -48,7 +50,7 @@ const RULES = [
   {
     name: "real phone number",
     re: /\+\d{11,15}\b/g,
-    allow: [/^\+919876543210$/, /^\+9111408481\d\d$/, /^\+9100000000\d\d$/],
+    allow: [/^\+919876543210$/, /^\+9100000000\d\d$/],
   },
   {
     name: "ephemeral tunnel hostname",
