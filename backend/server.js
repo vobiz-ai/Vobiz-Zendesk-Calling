@@ -67,6 +67,10 @@ const digitsOf = n => String(n || '').replace(/\D/g, '');
 const AUTH_ID_RE = /^[A-Za-z0-9_]{4,64}$/;
 const ID_RE = /^\d+$/;
 const E164_STRICT = /^\+?\d{10,15}$/;
+// One agent = one Zendesk user. The panel sends `zd<Zendesk user id>`, read from
+// ZAF's currentUser, so two agents of one account never share an endpoint (a
+// shared one meant each sign-in rotated everyone else's SIP password).
+const AGENT_ID_RE = /^zd[1-9]\d{0,19}$/;
 
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 
@@ -298,8 +302,9 @@ async function ensureEndpoint(account, agentId) {
   }
 
   // The alias names this agent exactly, so an endpoint survives a lost data
-  // dir: it is found again by alias instead of being created twice.
-  const agentPart = String(agentId).replace(/[^A-Za-z0-9]/g, '').slice(0, 16) || 'agent';
+  // dir: it is found again by alias instead of being created twice. agentId is
+  // already validated as zd<digits>, so it is safe in both alias and username.
+  const agentPart = String(agentId);
   const alias = `Zendesk-${agentPart}-${crypto.createHash('sha256').update(String(agentId)).digest('hex').slice(0, 8)}`;
   if (!known) {
     const list = await vobiz(account, 'GET', '/Endpoint/?limit=100');
@@ -317,7 +322,7 @@ async function ensureEndpoint(account, agentId) {
 
   // Usernames must be alphanumeric. Vobiz rewrites the submitted one anyway, so
   // the stored one is always read back.
-  const submitted = `zd${agentPart}${crypto.randomBytes(3).toString('hex')}`;
+  const submitted = `${agentPart}x${crypto.randomBytes(3).toString('hex')}`;
   const created = await vobiz(account, 'POST', '/Endpoint/', { username: submitted, password, alias });
   const endpointId = created.body && created.body.endpoint_id ? String(created.body.endpoint_id) : '';
   if (!ok(created) || !endpointId) {
@@ -666,7 +671,10 @@ app.post('/login', async (req, res) => {
   if (!agentId || !authId || !authToken) {
     return res.status(400).json({ error: 'agentId, authId and authToken are all required' });
   }
-  if (!AUTH_ID_RE.test(String(authId)) || typeof authToken !== 'string' || String(agentId).length > 128) {
+  if (!AGENT_ID_RE.test(String(agentId))) {
+    return res.status(400).json({ error: 'agentId must be "zd" followed by the Zendesk user id. Reload the Zendesk tab and sign in again.' });
+  }
+  if (!AUTH_ID_RE.test(String(authId)) || typeof authToken !== 'string') {
     return res.status(400).json({ error: 'That does not look like a Vobiz Auth ID.' });
   }
   if (!PUBLIC_BASE || !PUBLIC_BASE.startsWith('https://')) {
@@ -702,6 +710,15 @@ app.post('/login', async (req, res) => {
   // Default: the agent's last choice, if it is still offered; else the first.
   const last = lastCallerId.get(`${account.authId}:${agentId}`);
   const from = numbers.includes(last) ? last : (numbers[0] || '');
+  // The password just rotated, so any older session of this same agent holds a
+  // dead SIP password. End it: that panel then shows "sign in again" instead of
+  // sitting on READY with credentials that no longer register.
+  for (const [t, o] of sessions) {
+    if (o.authId === account.authId && o.agentId === String(agentId)) sessions.delete(t);
+  }
+  // From here on the agent identity comes from the session, never the request:
+  // every session-gated route reads req.session.agentId, so a token minted for
+  // one Zendesk user cannot act as another.
   const token = newSession({
     agentId: String(agentId), authId: account.authId, numbers, from,
     sipUser: ep.username, sipPassword: ep.password, endpointId: ep.endpointId,
@@ -821,12 +838,32 @@ app.get('/call-record', requireSession, (req, res) => {
   });
 });
 
+/**
+ * Recordings of calls THIS backend handled for the session's account — not the
+ * last N recordings on the whole Vobiz account, which would show agents calls
+ * made by other systems on the same account. The call ledger (in memory, newest
+ * 200 calls) is the filter; Vobiz's list is paged until enough matches.
+ */
 app.get('/recordings', requireSession, async (req, res) => {
   const account = accounts.get(req.session.authId);
   if (!account) return res.status(401).json({ error: 'Sign in again.' });
-  const limit = Math.min(Number(req.query.limit || 15), 50);
-  const r = await vobiz(account, 'GET', `/Recording/?limit=${limit}`);
-  const objects = listOf(r).map(o => ({
+  const limit = Math.max(1, Math.min(Number(req.query.limit) || 15, 50));
+  const ours = new Set(recentCalls.filter(c => c.authId === account.authId && c.callUuid).map(c => c.callUuid));
+  const found = [];
+  const seen = new Set();
+  const PAGE = 100;
+  for (let offset = 0; ours.size && offset < 5 * PAGE && found.length < limit; offset += PAGE) {
+    const r = await vobiz(account, 'GET', `/Recording/?limit=${PAGE}&offset=${offset}`);
+    if (!ok(r)) break;
+    const page = listOf(r);
+    for (const o of page) {
+      if (!o || !ours.has(o.call_uuid) || seen.has(o.recording_id)) continue;
+      seen.add(o.recording_id);
+      found.push(o);
+    }
+    if (page.length < PAGE) break;
+  }
+  const objects = found.slice(0, limit).map(o => ({
     recording_id: o.recording_id,
     add_time: o.add_time,
     rounded_recording_duration: o.rounded_recording_duration,

@@ -182,8 +182,9 @@
             <h2 class="step-title">Place a call</h2>
           </div>
           <p class="step-help">
-            Type a number in E.164 format, or click any phone number in
-            Zendesk and this panel dials it for you.
+            Type a number in E.164 format, or use <strong>Call requester</strong>
+            in a ticket's sidebar. Clicking a phone number elsewhere in Zendesk
+            dials it here too, but only on Zendesk Talk Partner Edition.
           </p>
 
           <div id="dialbox">
@@ -232,7 +233,7 @@
 
       <div id="call-history">
         <div class="section-title">
-          <span>Call recordings</span>
+          <span>Recordings of calls made here</span>
           <button id="refresh-history-btn" class="icon-btn" title="Refresh" aria-label="Refresh recordings">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
@@ -256,11 +257,12 @@
         </summary>
 
         <div class="faq-item">
-          <h3>Why does the person I call hear ringing after answering?</h3>
+          <h3>How does a call connect?</h3>
           <p>
-            Vobiz dials the customer first, then bridges your browser in. Those
-            few seconds of ringback are that second leg connecting. It is
-            expected, and the call order cannot be reversed.
+            Your browser places the call: it connects to Vobiz first, and Vobiz
+            then dials the customer from your chosen caller ID. You hear the
+            customer's phone ringing, and the call is bridged as soon as they
+            answer.
           </p>
         </div>
 
@@ -285,8 +287,10 @@
         <div class="faq-item">
           <h3>Where do recordings go?</h3>
           <p>
-            Vobiz records the call and this panel lists recent ones above.
-            Calls are also logged to tickets in Zendesk. Playback is proxied
+            Vobiz records each call. The list above shows recordings of calls
+            this calling backend handled for your Vobiz account since it last
+            started, not every recording on the account. Calls are also logged
+            to tickets in Zendesk. Playback is proxied
             through your calling backend, because recording files need
             authentication a plain audio tag cannot send.
           </p>

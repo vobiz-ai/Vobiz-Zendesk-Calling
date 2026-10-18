@@ -39,12 +39,6 @@
       "secure": false
     },
     {
-      "name": "agent_id",
-      "type": "text",
-      "required": true,
-      "secure": false
-    },
-    {
       "name": "registrar_url",
       "type": "text",
       "required": false,

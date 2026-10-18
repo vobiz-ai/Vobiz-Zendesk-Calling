@@ -23,7 +23,11 @@ const endpoints = {};   // endpointId -> { authId, username, password, app }
 let nextEndpoint = 700001;
 
 const recordingsFor = authId => authId === 'MA_TEST0001'
-  ? [{ recording_id: 'rec-1', call_uuid: 'call-1', recording_url: 'https://media.vobiz.test/rec-1.mp3', add_time: 't', rounded_recording_duration: 9 }]
+  ? [
+    // A call some other system on the same account made: never shown in this panel.
+    { recording_id: 'rec-foreign', call_uuid: 'not-handled-here', recording_url: 'https://media.vobiz.test/rec-foreign.mp3', add_time: 't', rounded_recording_duration: 30 },
+    { recording_id: 'rec-1', call_uuid: 'call-1', recording_url: 'https://media.vobiz.test/rec-1.mp3', add_time: 't', rounded_recording_duration: 9 },
+  ]
   : [{ recording_id: 'rec-2', call_uuid: 'call-2', recording_url: 'https://media.vobiz.test/rec-2.mp3', add_time: 't', rounded_recording_duration: 7 }];
 
 global.fetch = async (url, opts = {}) => {

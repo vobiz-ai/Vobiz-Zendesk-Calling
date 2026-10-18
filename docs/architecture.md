@@ -8,7 +8,8 @@ only tells Vobiz where to connect it.
 Nothing account-specific is configured on the backend. On **Vobiz account**
 sign-in the backend verifies the Auth ID and Auth Token with Vobiz, then inside
 that account finds or creates this integration's application (answer URL
-`PUBLIC_BASE/answer`) and one SIP endpoint for the agent, sets a fresh SIP
+`PUBLIC_BASE/answer`) and one SIP endpoint for the agent (one per Zendesk user: the panel sends
+`zd<Zendesk user id>` from ZAF `currentUser`), sets a fresh SIP
 password that only that browser session receives, and binds the endpoint to the
 application. The Auth Token stays in backend memory, keyed by Auth ID.
 
@@ -24,7 +25,8 @@ backend.
 
 ## An outbound call, end to end
 
-1. The agent clicks **Call**, or clicks a number in Zendesk.
+1. The agent clicks **Call** in the panel or **Call requester** in the ticket
+   sidebar, or (Talk Partner Edition only) clicks a number in Zendesk.
 2. **The panel sends the SIP INVITE itself**, over WebSocket to the registrar.
 3. Vobiz fetches the answer URL of the application this SIP endpoint is bound
    to — the backend's `/answer`.

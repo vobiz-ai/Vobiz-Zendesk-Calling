@@ -1,8 +1,13 @@
 /** === Vobiz Calling — Zendesk Support CTI app ===
  *
  * A softphone that lives in the Zendesk top bar. It stays registered over SIP
- * while the panel is open, dials when the agent clicks Call or clicks a phone
- * number in Zendesk, logs calls to tickets, and displays recent recordings.
+ * while the panel is open, dials when the agent clicks Call (here or in the
+ * ticket sidebar; clicking a phone number anywhere in Zendesk also dials, on
+ * Talk Partner Edition only), logs calls to tickets, and lists recordings of
+ * the calls this backend handled.
+ *
+ * The agent identity is the signed-in Zendesk user (`zd<user id>`), so every
+ * agent gets their own SIP endpoint inside the Vobiz account.
  *
  * THE BROWSER IS THE A LEG. This panel sends the SIP INVITE itself and the
  * backend answers with <Dial><Number>.
@@ -37,6 +42,14 @@ let lastCallRecord = null;
 let numberApps = {};
 let ownAppId = "";
 
+// How often a signed-in panel asks the backend whether its session still
+// exists. A backend restart forgets every session; without this the badge stays
+// on READY while every call is refused.
+const SESSION_CHECK_MS = 60 * 1000;
+let sessionCheckTimer = null;
+// Set when the session is found gone during a call; acted on once it ends.
+let sessionExpired = false;
+
 // ─── backend plumbing ────────────────────────────────────────────────────────
 
 /**
@@ -45,12 +58,20 @@ let ownAppId = "";
  */
 async function backendFetch(pathname, options = {}) {
   const url = pathname.startsWith("http") ? pathname : `${backendUrl}${pathname}`;
+  const sentToken = sessionToken;
   const headers = {
     "ngrok-skip-browser-warning": "1",
-    ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+    ...(sentToken ? { Authorization: `Bearer ${sentToken}` } : {}),
     ...(options.headers || {}),
   };
-  return fetch(url, { ...options, headers });
+  const res = await fetch(url, { ...options, headers });
+  // A 401 on a request that carried our session token means the backend no
+  // longer knows the session (restart, expiry, or a newer sign-in by this
+  // agent). A 401 from /login itself is a wrong Auth Token, not an expiry.
+  if (res.status === 401 && sentToken && sentToken === sessionToken && !/^\/login\b/.test(pathname)) {
+    onSessionExpired();
+  }
+  return res;
 }
 
 async function backendJson(pathname, options) {
@@ -83,7 +104,6 @@ async function init() {
       const metadata = await client.metadata();
       const settings = normaliseSettings(metadata && metadata.settings);
       backendUrl = String(settings.backend_url || "").trim().replace(/\/+$/, "");
-      agentId = String(settings.agent_id || "").trim();
       if (settings.registrar_url) registrarUrl = String(settings.registrar_url).trim();
 
       const context = await client.context();
@@ -91,14 +111,22 @@ async function init() {
     } catch (err) {
       console.warn("[Vobiz] Could not read app settings:", err);
     }
+
+    // One SIP endpoint per Zendesk user, so agents sharing a Vobiz account never
+    // share (and keep rotating) one endpoint's password.
+    agentId = await zendeskAgentId(client);
   } else {
     console.log("[Vobiz] Standalone dev mode — no ZAF client.");
     backendUrl = "http://localhost:8092";
-    agentId = "test-agent";
+    agentId = "zd1";
   }
 
-  if (!backendUrl || !agentId) {
-    setStatus("Not configured — set the Backend URL and Agent Identity in this app's settings.", "error");
+  if (!backendUrl) {
+    setStatus("Not configured — set the Backend URL in this app's settings.", "error");
+    return;
+  }
+  if (!agentId) {
+    setStatus("Could not read your Zendesk user — reload the Zendesk tab.", "error");
     return;
   }
 
@@ -123,6 +151,18 @@ async function init() {
   restoreAuthMode();
   if (authMode !== "sip") {
     await restoreVobizSession();
+  }
+}
+
+/** `zd<Zendesk user id>` for the signed-in Zendesk user, or "" if unreadable. */
+async function zendeskAgentId(zafClient) {
+  try {
+    const data = await zafClient.get("currentUser");
+    const id = data && data.currentUser && data.currentUser.id;
+    return /^[1-9]\d{0,19}$/.test(String(id || "")) ? `zd${id}` : "";
+  } catch (err) {
+    console.warn("[Vobiz] Could not read the current Zendesk user:", err);
+    return "";
   }
 }
 
@@ -288,8 +328,77 @@ function restoreAuthMode() {
 
 // ─── session & auth ──────────────────────────────────────────────────────────
 
+// ─── session expiry ──────────────────────────────────────────────────────────
+
+function startSessionCheck() {
+  stopSessionCheck();
+  sessionCheckTimer = setInterval(checkSession, SESSION_CHECK_MS);
+}
+
+function stopSessionCheck() {
+  if (sessionCheckTimer) clearInterval(sessionCheckTimer);
+  sessionCheckTimer = null;
+}
+
+/** Periodic: does the backend still know this panel's session? */
+async function checkSession() {
+  if (!sessionToken) return;
+  if (sessionExpired) { onSessionExpired(); return; }
+  try {
+    const res = await backendFetch("/session");
+    if (res.status === 401) return; // backendFetch already handled it
+    const session = await res.json().catch(() => null);
+    if (session && session.loggedIn === false) onSessionExpired();
+  } catch (err) {
+    // Unreachable is not the same as signed out; the next tick tries again.
+    console.warn("[Vobiz] session check failed:", err);
+  }
+}
+
+/**
+ * The backend no longer has this panel's session. Drop to SIGNED OUT and
+ * unregister SIP, so the badge never claims READY for calls that would be
+ * refused. A call in progress is left alone — the media path does not depend
+ * on the session — and the sign-out happens once it ends.
+ */
+function onSessionExpired() {
+  if (!sessionToken && !sessionExpired) return;
+  sessionExpired = true;
+  if (currentRTCSession) return;
+  signOutLocally("Your calling session ended (the backend may have restarted). Please sign in again.");
+}
+
+function signOutLocally(message) {
+  sessionExpired = false;
+  sessionToken = "";
+  try { sessionStorage.removeItem("vobiz_session_token"); } catch { /* ignore */ }
+  stopSessionCheck();
+  if (vobizUA) {
+    const ua = vobizUA;
+    vobizUA = null;
+    // Listeners off first, so "unregistered"/"disconnected" cannot overwrite
+    // the signed-out state with "reconnecting".
+    try { ua.removeAllListeners(); } catch { /* ignore */ }
+    try { ua.unregister({ all: false }); } catch { /* ignore */ }
+    try { ua.stop(); } catch { /* ignore */ }
+  }
+  agentIdentity = null;
+  setSipRegistered(false);
+  setDialEnabled(false);
+  setStatus(message, "pending");
+  setLoginStatus(message);
+  const historyList = document.getElementById("call-history-list");
+  if (historyList) historyList.innerHTML = "";
+}
+
+// A call just ended: if the session went away during it, sign out now.
+function afterCallEnded() {
+  if (sessionExpired) onSessionExpired();
+}
+
 async function restoreVobizSession() {
   sessionToken = sessionStorage.getItem("vobiz_session_token") || "";
+  const hadToken = Boolean(sessionToken);
   try {
     const res = await backendFetch("/session");
     const session = await res.json().catch(() => ({}));
@@ -301,13 +410,20 @@ async function restoreVobizSession() {
       setDialEnabled(true);
       loadCallHistory();
       initVobizSip();
+      startSessionCheck();
     } else {
       // No session yet: the SIP identity is behind the session, so there is
       // nothing to register with until the agent signs in.
       sessionStorage.removeItem("vobiz_session_token");
       sessionToken = "";
       setDialEnabled(false);
-      setStatus("Sign in to start calling", "pending");
+      if (hadToken) {
+        const msg = "Your calling session ended (the backend may have restarted). Please sign in again.";
+        setStatus(msg, "pending");
+        setLoginStatus(msg);
+      } else {
+        setStatus("Sign in to start calling", "pending");
+      }
     }
   } catch (err) {
     console.warn("[Vobiz] Could not check login session:", err);
@@ -335,6 +451,7 @@ async function vobizLogin() {
     });
 
     sessionToken = data.token;
+    sessionExpired = false;
     sessionStorage.setItem("vobiz_session_token", sessionToken);
 
     // The backend has verified the account and set up this agent's own SIP
@@ -346,6 +463,7 @@ async function vobizLogin() {
     setDialEnabled(true);
     loadCallHistory();
     initVobizSip();
+    startSessionCheck();
   } catch (err) {
     setLoginStatus(`Login failed: ${err.message}`);
     setDialEnabled(false);
@@ -382,7 +500,7 @@ function setStatus(text, tone = "pending") {
       badge.className = "status-badge is-error unregistered";
     } else {
       // The badge is a short state; the full sentence goes in the message line.
-      const short = /^sign in/i.test(text) ? "SIGNED OUT"
+      const short = /\bsign in\b/i.test(text) ? "SIGNED OUT"
         : /^incoming/i.test(text) ? "RINGING"
         : text.length > 12 ? (tone === "busy" ? "ON CALL" : "CONNECTING")
         : text.toUpperCase();
@@ -491,12 +609,13 @@ async function loadCallHistory() {
   const historyList = document.getElementById("call-history-list");
   if (!historyList) return;
 
-  historyList.innerHTML = `<li class="history-empty">Loading recent recordings…</li>`;
+  if (!sessionToken) return;
+  historyList.innerHTML = `<li class="history-empty">Loading recordings…</li>`;
   try {
     const data = await backendJson("/recordings?limit=10");
     const recordings = (data && data.objects) || [];
     if (!recordings.length) {
-      historyList.innerHTML = `<li class="history-empty">No calls recorded yet. Completed calls with audio will appear here automatically.</li>`;
+      historyList.innerHTML = `<li class="history-empty">No recordings yet. Calls placed or taken in this panel appear here once their audio is ready.</li>`;
       return;
     }
 
@@ -531,7 +650,12 @@ async function loadCallHistory() {
       historyList.appendChild(li);
     });
   } catch (err) {
-    historyList.innerHTML = `<li class="history-empty">Recordings unavailable (${err.message}). Sign in above to view recordings.</li>`;
+    if (!sessionToken) return; // signed out by a 401 — the status line says so
+    const li = document.createElement("li");
+    li.className = "history-empty";
+    li.textContent = `Recordings unavailable (${err.message}).`;
+    historyList.innerHTML = "";
+    historyList.appendChild(li);
   }
 }
 
@@ -812,6 +936,7 @@ function startSipUA(sipUser, sipPassword, displayName) {
         setHangupVisible(false);
         autoLogCallToZendesk();
         setTimeout(loadCallHistory, 5000);
+        afterCallEnded();
       };
 
       currentRTCSession.on("ended", onCallDone);
@@ -929,6 +1054,7 @@ async function placeCall(number) {
       setStatus("Ready", "ok");
       currentRTCSession = null;
       setHangupVisible(false);
+      afterCallEnded();
     });
 
     session.on("ended", () => {
@@ -944,6 +1070,7 @@ async function placeCall(number) {
       // Log call to ticket and refresh recordings
       autoLogCallToZendesk();
       setTimeout(loadCallHistory, 5000);
+      afterCallEnded();
     });
   } catch (err) {
     console.error("[Vobiz] Could not start the call:", err);

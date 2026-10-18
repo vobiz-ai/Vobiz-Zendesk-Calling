@@ -75,13 +75,13 @@ The `<Record callbackUrl>` target. Records `RecordingID` and
 
 ### `POST /login`
 
-`{ "agentId", "authId", "authToken" }` → `{ "token", "numbers", "numberApps", "selected", "appId", "authId", "sipUser", "bound" }`.
+`{ "agentId", "authId", "authToken" }` (`agentId` is `zd<Zendesk user id>`, from ZAF `currentUser`; anything else is **400**) → `{ "token", "numbers", "numberApps", "selected", "appId", "authId", "sipUser", "bound" }`.
 
 1. Verifies the pair with `GET /Account/{authId}/numbers?page=N&per_page=100`
    (paged until `total`). Non-2xx → **401**.
 2. Find-or-create the application whose `answer_url` is `{PUBLIC_BASE}/answer`
    (never edits one it did not create).
-3. Find-or-create one endpoint per `(authId, agentId)` — from
+3. Find-or-create one endpoint per `(authId, agentId)`, i.e. per Zendesk user — from
    `{DATA_DIR}/endpoints.json` (ids and usernames only, mode 0600), else by its
    exact alias — then sets a fresh random SIP password on it
    (`POST /Endpoint/{id}/ {"password"}`). The stored username is always read
@@ -97,7 +97,10 @@ the application it is on now. Default selection is the agent's last choice.
 
 ### `GET /session` · `POST /logout`
 
-Session state for the bearer token (no credentials), and sign-out.
+Session state for the bearer token (no credentials), and sign-out. A signed-in
+panel polls `GET /session` every 60 s and treats `loggedIn: false`, or a 401
+from any session route, as "sign in again". A new `/login` by the same
+`(authId, agentId)` ends that agent's older sessions.
 
 ### `POST /login-sip`
 
@@ -144,7 +147,9 @@ after hangup:
 
 `{ "objects": [{ "recording_id", "call_uuid", "add_time", "rounded_recording_duration", "playUrl" }] }`.
 `playUrl` is a signed `/recording-audio/…` link valid for
-`RECORDING_URL_TTL_SECONDS`.
+`RECORDING_URL_TTL_SECONDS`. Only recordings of calls this backend handled for
+the session's account (its in-memory call ledger) are listed, not every
+recording on the account; a restart empties the list.
 
 ### `GET /recording-audio/:recordingId?authId=&exp=&sig=`
 

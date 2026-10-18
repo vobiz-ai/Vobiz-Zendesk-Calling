@@ -33,11 +33,11 @@ and no Zendesk Talk subscription.
 - **Call logging.** After every call, a private internal note is added to the
   open ticket, or a new ticket is created, with direction, numbers, duration
   and a recording link.
-- **Recordings.** Every call is recorded. Play recent recordings in the panel,
-  or open the signed, expiring link in the ticket.
+- **Recordings.** Every call is recorded. Play recordings of calls made or
+  taken through the panel, or open the signed, expiring link in the ticket.
 - **Caller-ID choice.** Pick which of your Vobiz numbers to call from.
-- **Multiple agents.** Each agent identity gets its own SIP endpoint in your
-  Vobiz account, set up automatically.
+- **Multiple agents.** Each Zendesk agent gets their own SIP endpoint in your
+  Vobiz account, set up automatically. No per-agent setting or installation.
 - **Two ways to sign in.** With your Vobiz account (Auth ID and Auth Token), or
   directly with an existing SIP endpoint.
 
@@ -138,8 +138,7 @@ Edit `zcli.apps.config.json`:
 ```json
 {
   "parameters": {
-    "backend_url": "https://calling.example.com",
-    "agent_id": "priya"
+    "backend_url": "https://calling.example.com"
   }
 }
 ```
@@ -176,9 +175,12 @@ account. You never create these by hand.
   `<PUBLIC_BASE>/answer` (method POST). If an application with that answer URL
   already exists, it is reused. An application with any other answer URL is
   never changed.
-- **One SIP endpoint per agent identity**, attached to that application. Each
-  sign-in sets a fresh random SIP password on it. Only that browser session
-  receives the password, and it is never written to disk.
+- **One SIP endpoint per Zendesk agent**, attached to that application. The
+  panel identifies the agent by their Zendesk user ID, so agents who share a
+  Vobiz account each get their own endpoint. Each sign-in sets a fresh random
+  SIP password on it. Only that browser session receives the password, and it
+  is never written to disk. Signing in again (for example in a second tab)
+  signs the older panel of that same agent out.
 
 **Choose a caller ID.** The **Calling from** dropdown lists your account's
 active, voice-enabled numbers. Calls go out from the number you pick, and the
@@ -299,8 +301,11 @@ set, and the caller must send `Authorization: Bearer <that secret>`.
 
 Every call is recorded (MP3, up to one hour per call).
 
-- **In the panel:** **Call recordings** lists the 10 most recent recordings
-  on your Vobiz account. Refresh the list with the refresh button.
+- **In the panel:** **Recordings of calls made here** lists up to 10 recent
+  recordings of calls this backend handled for your Vobiz account (calls made
+  or taken through the panel since the backend last started). Recordings of
+  other calls on the same Vobiz account are not shown. Refresh the list with
+  the refresh button.
 - **In the ticket:** the recording link plays once Vobiz has finished
   processing the file, usually within a minute. Until then it answers "The
   recording is still processing". Ticket links expire after 7 days by default.
@@ -315,7 +320,6 @@ Vobiz Calling → Settings**, or in `zcli.apps.config.json` when running locally
 | Setting | Label | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `backend_url` | Backend URL | Yes | — | Public HTTPS base URL of your backend, no trailing slash. `http://localhost` is accepted for local testing only. |
-| `agent_id` | Agent identity | Yes | — | A label for the agent. Each distinct value gets its own SIP endpoint in the signed-in Vobiz account. |
 | `registrar_url` | SIP registrar URL | No | `wss://registrar.vobiz.ai:5063/` | The Vobiz SIP-over-WebSocket address. Leave it unless Vobiz support tells you otherwise. |
 
 ### Backend environment variables
@@ -327,7 +331,7 @@ Set in `backend/.env` (or the process environment).
 | `PUBLIC_BASE` | **Yes** | — | Your backend's public HTTPS URL, e.g. `https://calling.example.com`. Vobiz calls `<PUBLIC_BASE>/answer`, `/dial-status` and `/recording-ready`. Sign-in is refused until this is an `https://` URL. |
 | `SIGNING_SECRET` | Yes in production | random at each start | Secret that signs recording links. If unset, a new one is made on every restart and older links stop working. Generate with `openssl rand -hex 32`. |
 | `PORT` | No | `8092` | Port the backend listens on. |
-| `DATA_DIR` | No | `backend/data` | Folder for the agent → SIP endpoint map (IDs and usernames only). |
+| `DATA_DIR` | No | `backend/data` | Folder for the Zendesk agent → SIP endpoint map (IDs and usernames only). |
 | `VOBIZ_REGISTRAR` | No | `registrar.vobiz.ai` | Vobiz SIP registrar host. |
 | `RECORDING_URL_TTL_SECONDS` | No | `300` | How long recording links in the panel stay valid. |
 | `TICKET_RECORDING_LINK_TTL_SECONDS` | No | `604800` (7 days) | How long recording links written into tickets stay valid. |
@@ -354,7 +358,8 @@ Set in `backend/.env` (or the process environment).
 - Put **`DATA_DIR`** on persistent storage so each agent keeps the same SIP
   endpoint across redeploys.
 - Run it under a process manager (systemd, pm2, a container restart policy).
-  After any restart, agents must sign in again.
+  After any restart, agents must sign in again; open panels notice within a
+  minute and ask them to.
 
 **The Zendesk app**
 
@@ -369,13 +374,10 @@ Set in `backend/.env` (or the process environment).
    The backend is never included in the package.
 2. In Zendesk, go to **Admin Center → Apps and integrations → Zendesk Support
    apps → Upload private app**, and upload the zip.
-3. Fill in **Backend URL** and **Agent identity**, and install.
+3. Fill in **Backend URL**, and install.
 
-The **Agent identity** setting applies to the whole installation. To give each
-agent their own SIP endpoint, install the app once per agent (or per group of
-agents who use different Vobiz accounts), each with a different Agent identity,
-and use the installation's role or group restrictions to show each one only to
-the right people. See [Limitations](#limitations).
+One installation serves every agent: each agent gets their own SIP endpoint,
+keyed by their Zendesk user ID.
 
 ## Security and privacy
 
@@ -388,7 +390,7 @@ the right people. See [Limitations](#limitations).
   and never stored in the browser. In SIP direct mode it never reaches the
   backend at all.
 - **What is stored on disk:** `DATA_DIR/endpoints.json`, mapping each Vobiz
-  Auth ID and agent identity to its SIP endpoint ID and username. No password,
+  Auth ID and Zendesk user ID to its SIP endpoint ID and username. No password,
   no token. File mode 0600.
 - **What is stored in the browser:** the session token (`sessionStorage`), the
   selected sign-in tab, and, only if you tick **Remember**, the SIP direct
@@ -417,7 +419,8 @@ public issue.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Panel says "Not configured — set the Backend URL and Agent Identity" | An app setting is empty | Fill in both settings (or `zcli.apps.config.json`) and reload. |
+| Panel says "Not configured — set the Backend URL" | The Backend URL setting is empty | Fill it in (or `zcli.apps.config.json`) and reload. |
+| "Could not read your Zendesk user" | The panel could not read the signed-in Zendesk user | Reload the Zendesk tab. |
 | "Backend URL must start with https://" | `backend_url` is plain `http://` and not localhost | Use your backend's HTTPS URL. |
 | "Cannot reach the calling backend" | The backend is down, the URL is wrong, or the browser blocked the request | Check `https://<backend>/health` in a browser. For a custom origin, add it to `ALLOWED_ORIGINS`. |
 | "Login failed: Vobiz did not accept that Auth ID and Auth Token" | Wrong credentials | Copy both from Console → **API credentials**. The Auth Token is not your login password. |
@@ -426,7 +429,7 @@ public issue.
 | "No numbers found on this account" | No active, voice-enabled number on the account | Buy or activate a number in the Console, then sign in again. |
 | Badge stays on **OFFLINE** or "Registration failed" | Browser cannot register with Vobiz | Allow WebSocket traffic to `registrar.vobiz.ai:5063`. In SIP direct mode, check the username and password in Console → Endpoints. |
 | Call fails at once with nothing in the backend log | Vobiz cannot reach `/answer` | Run the `curl` check from the Quick start from outside your network. If your tunnel hostname changed, update `PUBLIC_BASE` and Backend URL, restart, and sign in again. |
-| Calls fail at once after a backend restart, although the badge says **READY** | The backend forgot every sign-in when it restarted | Reload the panel and sign in again. |
+| Badge drops to **SIGNED OUT** with "Please sign in again" | The backend restarted, the 12-hour session expired, or you signed in as the same agent elsewhere | Sign in again. The panel checks its session every minute and on every request. |
 | Customer's phone never rings; backend log shows `bleg=(none …)` | The destination is unreachable, or the caller ID is not a number on this Vobiz account | Check the number format (`+91XXXXXXXXXX`) and your caller ID. |
 | Call connects but nobody hears anything | Microphone blocked, or the network blocks WebRTC media | Allow the microphone for Zendesk. Try another network; STUN (`stun.l.google.com:19302`) must be reachable. |
 | Inbound calls never ring the panel | The number is on another application, or no agent is signed in | Click **Enable inbound calls** with that number selected, and keep the panel open and **READY**. |
@@ -434,19 +437,20 @@ public issue.
 | Outbound calls create a new ticket instead of using the open one | No ticket was open in the agent's current tab when the call started | Open the ticket first, then call (for example with **Call requester**). Inbound calls always create a new ticket. |
 | Recording link says "invalid or has expired" | The link is older than its time limit, or `SIGNING_SECRET` changed | Set a fixed `SIGNING_SECRET`. Play the recording from the panel. |
 | Recording link says "The calling backend restarted since this link was made" | The backend restarted and nobody from that Vobiz account has signed in since | Sign in to the panel with that account, then open the link again. |
-| An agent keeps getting signed out, or the wrong agent rings | Two agents share one Agent identity, so one SIP endpoint | Give each agent their own installation and Agent identity. |
+| An agent keeps getting signed out | The same Zendesk agent is signed in to the panel in another tab or browser | Each new sign-in ends that agent's older one. Use one panel at a time. |
 
 ## Limitations
 
 - **Sign in again after the backend restarts.** Auth Tokens and sessions live
-  in memory only. Sessions also expire after 12 hours.
+  in memory only. Sessions also expire after 12 hours. The panel shows
+  **SIGNED OUT** when this happens (within a minute, or at once on the next
+  request).
 - **Run one backend instance.** State is not shared between instances.
-- **One endpoint per Agent identity.** The Agent identity is set per app
-  installation, not per agent. Agents who sign in to the same Vobiz account
-  through the same installation share one SIP endpoint, and each sign-in
-  replaces the previous agent's password, so only the latest sign-in keeps
-  working. Use one installation per agent (see
-  [Deploying to production](#deploying-to-production)).
+- **One panel per agent at a time.** Each Zendesk agent has one SIP endpoint;
+  signing in again elsewhere signs the older panel out.
+- **The agent is identified by the panel.** The backend binds each session to
+  the Zendesk user ID the panel reports, but does not verify it with Zendesk.
+  Anyone with the Vobiz Auth ID and Auth Token can sign in as any agent ID.
 - **Inbound rings everyone on the account.** All signed-in agents of the Vobiz
   account ring together. There is no queue, routing or per-number assignment.
 - **No hold, mute, transfer or conference.**
@@ -457,8 +461,9 @@ public issue.
   **Enable inbound calls**, and its ticket notes have no recording link.
 - **Click-to-dial on any phone number needs Talk Partner Edition.** On other
   plans, use **Call requester** or the panel.
-- **The recordings list in the panel shows the whole Vobiz account,** not only
-  calls made through Zendesk.
+- **The panel's recordings list forgets on restart.** It lists calls this
+  backend handled since it last started (up to its 200 most recent calls).
+  Ticket recording links keep working.
 - **Private app only.** It is not listed on the Zendesk Marketplace.
 
 ## Development
@@ -476,7 +481,7 @@ request. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 | Path | What it is |
 | --- | --- |
-| `manifest.json` | Zendesk app manifest: three locations, three settings |
+| `manifest.json` | Zendesk app manifest: three locations, two settings |
 | `assets/index.html`, `assets/scripts/app.js` | The softphone panel (top bar) |
 | `assets/sidebar.html`, `assets/scripts/sidebar.js` | Ticket sidebar: open-ticket context and **Call requester** |
 | `assets/background.html`, `assets/scripts/background.js` | Relays Zendesk click-to-dial to the panel |
@@ -484,7 +489,7 @@ request. See [CONTRIBUTING.md](CONTRIBUTING.md).
 | `backend/server.js` | Sign-in, Vobiz webhooks, recordings, call log endpoints |
 | `backend/zendeskService.js` | Writes call logs and transcripts to Zendesk |
 | `backend/.env.example` | Every backend setting, with comments |
-| `backend/test/` | Backend tests |
+| `backend/test/` | Backend tests, and panel tests that run `app.js` against a fake DOM |
 | `scripts/` | Lint, secret scan and packaging |
 | `docs/architecture.md` | How calls flow, in more depth |
 | `docs/backend-contract.md` | Every backend route, request and response |
