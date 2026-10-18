@@ -69,7 +69,9 @@ calls through them.
 
 **SIP direct is not verified.** That mode has no account credentials, so the
 backend cannot check the SIP username or caller ID the agent types. Vobiz
-refuses a caller ID the endpoint's account does not own. See ISSUES.md.
+refuses a caller ID the endpoint's account does not own. A SIP-direct sign-in
+for a number also receives inbound calls to that number when no signed-in
+account owns it.
 
 **The SIP password reaches the browser.** WebRTC registration needs it. It is
 served only to a signed-in session, over HTTPS, and is never stored in

@@ -8,7 +8,7 @@
  * the agent's browser in with <Dial><User> — is what this file used to do, and
  * it does not work. Routing *into* a registered WebRTC endpoint is broken
  * platform-side: Vobiz builds a gateway URI it cannot parse and drops its own
- * INVITE ("tr_eval_uri(): invalid uri", "blocking gw"). See ISSUES.md.
+ * INVITE ("tr_eval_uri(): invalid uri", "blocking gw"). See docs/architecture.md.
  *
  * Any Vobiz account can sign in. Nothing account-specific lives in .env: the
  * agent types an Auth ID and Auth Token, this service checks them against
