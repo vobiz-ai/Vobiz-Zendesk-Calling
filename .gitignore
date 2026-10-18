@@ -24,3 +24,6 @@ node_modules/
 Thumbs.db
 .vscode/
 .idea/
+
+# Agent -> SIP endpoint map (ids only, never passwords)
+backend/data/

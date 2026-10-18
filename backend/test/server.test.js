@@ -3,6 +3,10 @@
  * the machine) and exercises it over HTTP. Each security case is one that has
  * actually shipped in this repository before.
  *
+ * The backend is started with NO Vobiz account values in its environment: any
+ * account must be able to sign in. The two accounts below are fakes defined in
+ * fetch-mock.cjs.
+ *
  * Run: npm test   (from the repo root, or `node --test` in backend/)
  */
 const { test, before, after } = require('node:test');
@@ -15,16 +19,20 @@ const path = require('node:path');
 const PORT = 20000 + Math.floor(Math.random() * 20000);
 const BASE = `http://127.0.0.1:${PORT}`;
 const FETCH_LOG = path.join(os.tmpdir(), `zd-fetch-${PORT}.jsonl`);
+const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'zd-data-'));
 const env = {
-  PATH: process.env.PATH, PORT: String(PORT), FETCH_LOG,
-  VOBIZ_AUTH_ID: 'MA_TEST', VOBIZ_AUTH_TOKEN: 'test-auth-token', VOBIZ_FROM_NUMBER: '+910000000001',
-  VOBIZ_SIP_USER: 'testagent123', VOBIZ_SIP_PASSWORD: 'test-sip-password',
+  PATH: process.env.PATH, PORT: String(PORT), FETCH_LOG, DATA_DIR,
   PUBLIC_BASE: 'https://backend.example.test', SIGNING_SECRET: 'test-signing-secret',
   ZENDESK_SUBDOMAIN: 'acme', ZENDESK_EMAIL: 'admin@acme.test', ZENDESK_API_TOKEN: 'test-zendesk-token',
   TRANSCRIPTION_WEBHOOK_SECRET: 'test-webhook-secret',
 };
 
+const ONE = { authId: 'MA_TEST0001', authToken: 'tok-account-one', appId: '43919358318796814' };
+const TWO = { authId: 'MA_TEST0002', authToken: 'tok-account-two', appId: '52000000000000017' };
+const TOKENS = [ONE.authToken, TWO.authToken];
+
 let server;
+let serverOutput = '';
 const fetched = () => fs.readFileSync(FETCH_LOG, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
 const req = (p, opts = {}) => fetch(`${BASE}${p}`, opts);
 const form = body => ({ method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body).toString() });
@@ -33,60 +41,271 @@ const jsonPost = (body, token) => ({
   headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
   body: JSON.stringify(body),
 });
+const bearer = token => ({ headers: { Authorization: `Bearer ${token}` } });
 
-async function login() {
-  const r = await req('/login', jsonPost({ agentId: 'priya', authId: 'MA_TEST', authToken: 'test-auth-token' }));
-  assert.equal(r.status, 200);
-  return (await r.json()).token;
+// Every HTTP response body the tests see is collected, so one test can assert
+// that no account Auth Token ever left the backend.
+const seenBodies = [];
+async function text(r) { const t = await r.text(); seenBodies.push(t); return t; }
+async function json(r) { return JSON.parse(await text(r)); }
+
+async function login(acct = ONE, agentId = 'priya') {
+  const r = await req('/login', jsonPost({ agentId, authId: acct.authId, authToken: acct.authToken }));
+  const body = await json(r);
+  assert.equal(r.status, 200, JSON.stringify(body));
+  const agent = await json(await req('/agent', bearer(body.token)));
+  return { token: body.token, body, agent, sipUser: agent.sipUser.split('@')[0] };
 }
 
 before(async () => {
   fs.writeFileSync(FETCH_LOG, '');
   server = spawn(process.execPath, ['-r', path.join(__dirname, 'fetch-mock.cjs'), path.join(__dirname, '..', 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  server.stdout.on('data', d => { serverOutput += String(d); });
+  server.stderr.on('data', d => { serverOutput += String(d); });
   await new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('backend did not start')), 8000);
     server.stdout.on('data', d => { if (String(d).includes('calling backend on')) { clearTimeout(t); resolve(); } });
     server.on('exit', code => reject(new Error(`backend exited ${code}`)));
   });
 });
-after(() => { server && server.kill(); fs.rmSync(FETCH_LOG, { force: true }); });
+after(() => {
+  server && server.kill();
+  fs.rmSync(FETCH_LOG, { force: true });
+  fs.rmSync(DATA_DIR, { recursive: true, force: true });
+});
 
 // ─── boot ────────────────────────────────────────────────────────────────────
-test('boot does not touch the Vobiz account', () => {
+test('boot does not touch any Vobiz account', () => {
   assert.deepEqual(fetched(), []);
+});
+
+// ─── sign-in: any account ────────────────────────────────────────────────────
+test('login with a wrong token is refused with 401 and creates nothing', async () => {
+  const mark = fetched().length;
+  const r = await req('/login', jsonPost({ agentId: 'x', authId: ONE.authId, authToken: 'wrong' }));
+  assert.equal(r.status, 401);
+  assert.match((await json(r)).error, /did not accept/);
+  const calls = fetched().slice(mark);
+  assert.equal(calls.length, 1, 'only the credential check');
+  assert.match(calls[0].url, /\/Account\/MA_TEST0001\/numbers\?page=1&per_page=100$/);
+});
+
+test('two different accounts both sign in and get distinct endpoints', async () => {
+  const a = await login(ONE, 'priya');
+  const b = await login(TWO, 'ravi');
+  assert.equal(a.body.authId, 'MA_TEST0001');
+  assert.equal(b.body.authId, 'MA_TEST0002');
+  assert.notEqual(a.sipUser, b.sipUser);
+  assert.match(a.sipUser, /^zdpriya[0-9a-f]+1187694299$/, 'the username Vobiz stored, read back');
+  assert.deepEqual(a.body.numbers, ['+910000000001', '+910000000002']);
+  assert.deepEqual(b.body.numbers, ['+910000000003']);
+  assert.notEqual(a.agent.sipPassword, b.agent.sipPassword);
+
+  // Each account's provisioning used only that account's credentials.
+  for (const c of fetched().filter(f => f.url.startsWith('https://api.vobiz.ai/'))) {
+    const owner = c.url.includes('/MA_TEST0001/') ? ONE : TWO;
+    if (c.authToken === 'wrong') continue;
+    assert.equal(c.authId, owner.authId, c.url);
+    assert.equal(c.authToken, owner.authToken, c.url);
+  }
+
+  // The endpoint map on disk holds ids and usernames only — no password, no token.
+  const file = path.join(DATA_DIR, 'endpoints.json');
+  const stored = fs.readFileSync(file, 'utf8');
+  const map = JSON.parse(stored);
+  assert.deepEqual(Object.keys(map).sort(), ['MA_TEST0001:priya', 'MA_TEST0002:ravi']);
+  assert.equal(map['MA_TEST0001:priya'].username, a.sipUser);
+  for (const secret of [...TOKENS, a.agent.sipPassword, b.agent.sipPassword]) assert.ok(!stored.includes(secret));
+  if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+});
+
+test('caller-ID list: every page of List Account Phone Numbers, active and voice-enabled only', async () => {
+  const mark = fetched().length;
+  const a = await login(ONE, 'picker');
+  const pages = fetched().slice(mark).filter(c => /\/numbers\?/.test(c.url)).map(c => new URL(c.url).searchParams.get('page'));
+  assert.deepEqual(pages, ['1', '2'], 'paged until total was loaded');
+  assert.deepEqual(a.body.numbers, ['+910000000001', '+910000000002']);
+  assert.ok(!a.body.numbers.includes('+910000000005'), 'released number not offered');
+  assert.ok(!a.body.numbers.includes('+910000000006'), 'voice-disabled number not offered');
+  assert.equal(a.body.selected, '+910000000001', 'defaults to the first');
+  assert.deepEqual(a.body.numberApps, { '+910000000001': '20577609616603585' }, 'shows which app each number is on');
+  for (const bad of ['+910000000005', '+910000000006', '+910000000099']) {
+    assert.equal((await req('/select-number', jsonPost({ number: bad }, a.token))).status, 400, bad);
+  }
+  // The last pick is remembered for that agent's next sign-in.
+  assert.equal((await req('/select-number', jsonPost({ number: '+910000000002' }, a.token))).status, 200);
+  const again = await login(ONE, 'picker');
+  assert.equal(again.body.selected, '+910000000002');
+  assert.equal((await json(await req('/session', bearer(again.token)))).from, '+910000000002');
+});
+
+test('signing in again reuses the endpoint and rotates its SIP password', async () => {
+  const first = await login(ONE, 'meera');
+  const mark = fetched().length;
+  const second = await login(ONE, 'meera');
+  assert.equal(second.sipUser, first.sipUser);
+  assert.notEqual(second.agent.sipPassword, first.agent.sipPassword);
+  const calls = fetched().slice(mark);
+  assert.ok(!calls.some(c => c.url.endsWith('/Endpoint/') && c.method === 'POST'), 'no second endpoint');
+  assert.ok(calls.some(c => /\/Endpoint\/\d+\/$/.test(c.url) && c.method === 'POST' && JSON.parse(c.body).password === second.agent.sipPassword));
+});
+
+test('bind sends the 17-digit app id as a string first, and that is all when it takes', async () => {
+  const binds = fetched().filter(c => /\/Account\/MA_TEST0001\/Endpoint\/\d+\/$/.test(c.url) && c.method === 'POST' && /app_id|application/.test(c.body));
+  assert.ok(binds.length);
+  for (const c of binds) assert.equal(c.body, '{"app_id":"43919358318796814"}');
+  // Only one application was ever created per account, and never repointed.
+  const created = fetched().filter(c => c.url.endsWith('/Application/') && c.method === 'POST');
+  assert.equal(created.filter(c => c.url.includes('MA_TEST0001')).length, 1);
+  assert.equal(created.filter(c => c.url.includes('MA_TEST0002')).length, 1);
+  assert.match(JSON.parse(created[0].body).app_name, /^[A-Za-z0-9_-]+$/);
+  assert.equal(JSON.parse(created[0].body).answer_url, 'https://backend.example.test/answer');
+  assert.ok(!fetched().some(c => /\/Application\/\d+\/$/.test(c.url) && c.method === 'POST'), 'never updates an application');
+});
+
+test('when app_id does not take, the bind is verified and retried with the exact 17-digit integer literal', async () => {
+  const two = fetched().filter(c => /\/Account\/MA_TEST0002\/Endpoint\/\d+\/$/.test(c.url) && c.method === 'POST' && /app_id|application/.test(c.body));
+  assert.ok(two.some(c => c.body === '{"app_id":"52000000000000017"}'));
+  assert.ok(two.some(c => c.body === '{"application":52000000000000017}'), 'raw integer literal, not 52000000000000016 or 5.2e16');
+  assert.match(serverOutput, /MA_TEST0002: endpoint \d+ bound to application 52000000000000017 after the documented "application" retry/);
+});
+
+test('a lost endpoint map does not create a second endpoint: found again by alias', async () => {
+  const first = await login(TWO, 'alias-agent');
+  fs.rmSync(path.join(DATA_DIR, 'endpoints.json'));
+  const mark = fetched().length;
+  const again = await login(TWO, 'alias-agent');
+  assert.equal(again.sipUser, first.sipUser);
+  assert.ok(!fetched().slice(mark).some(c => c.url.endsWith('/Endpoint/') && c.method === 'POST'));
+});
+
+test('sign-in never moves a number between applications', () => {
+  assert.ok(!fetched().some(c => /\/numbers\/.+\/application$/.test(c.url)));
 });
 
 // ─── SIP credentials ─────────────────────────────────────────────────────────
 test('GET /agent/:anything does not exist', async () => {
   const r = await req('/agent/anyone');
   assert.equal(r.status, 404);
-  assert.ok(!(await r.text()).includes('test-sip-password'));
 });
 
-test('GET /agent without a session is refused and leaks nothing', async () => {
-  const r = await req('/agent');
-  assert.equal(r.status, 401);
-  assert.ok(!(await r.text()).includes('test-sip-password'));
-});
-
-test('GET /agent with a session returns the SIP identity', async () => {
-  const token = await login();
-  const r = await req('/agent', { headers: { Authorization: `Bearer ${token}` } });
-  assert.equal(r.status, 200);
-  const body = await r.json();
-  assert.equal(body.sipUser, 'testagent123@registrar.vobiz.ai');
-  assert.equal(body.sipPassword, 'test-sip-password');
-});
-
-test('login with the wrong token is refused', async () => {
-  const r = await req('/login', jsonPost({ agentId: 'x', authId: 'MA_TEST', authToken: 'wrong' }));
-  assert.equal(r.status, 401);
+test('GET /agent without a session is refused', async () => {
+  assert.equal((await req('/agent')).status, 401);
 });
 
 test('/session/:agentId does not hand out session details by agent id', async () => {
   await login();
   assert.equal((await req('/session/priya')).status, 404);
-  assert.deepEqual(await (await req('/session')).json(), { loggedIn: false });
+  assert.deepEqual(await json(await req('/session')), { loggedIn: false });
+});
+
+test('SIP direct: works with no account credentials and maps the SIP user to the typed caller ID', async () => {
+  const mark = fetched().length;
+  const r = await req('/login-sip', jsonPost({ sipUser: 'deskphone01', callerId: '+910000000060' }));
+  assert.equal(r.status, 200);
+  assert.equal(fetched().length, mark, 'SIP direct makes no Vobiz API call');
+  const xml = await text(await req('/answer', form({ From: 'sip:deskphone01@registrar.vobiz.ai', To: '910000000099', CallUUID: 'u-direct' })));
+  assert.match(xml, /<Dial callerId="\+910000000060"/);
+  // And its number rings it inbound, when no signed-in account claims the DID.
+  const inbound = await text(await req('/answer', form({ From: '910000000097', To: '910000000060', CallUUID: 'u-direct-in', Direction: 'inbound' })));
+  assert.match(inbound, /<User>sip:deskphone01@registrar\.vobiz\.ai<\/User>/);
+  assert.match(inbound, /<Dial callerId="\+910000000060"/);
+});
+
+test('SIP direct: X-VH-Caller-ID header on the INVITE sets the caller ID even without /login-sip', async () => {
+  const xml = await text(await req('/answer', form({ From: 'sip:deskphone02@registrar.vobiz.ai', To: '910000000099', CallUUID: 'u-hdr', 'SIPHeader_X-VH-Caller-ID': '+910000000061' })));
+  assert.match(xml, /<Dial callerId="\+910000000061"/);
+});
+
+test('SIP direct cannot claim an endpoint signed in with an account', async () => {
+  const a = await login(ONE, 'claimed');
+  const r = await req('/login-sip', jsonPost({ sipUser: a.sipUser, callerId: '+910000000062' }));
+  assert.equal(r.status, 409);
+});
+
+test('account mode: the X-VH-Caller-ID header is honoured only for that account\'s own numbers', async () => {
+  const a = await login(ONE, 'hdracct');
+  const own = await text(await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '910000000099', CallUUID: 'u-h1', 'X-VH-Caller-ID': '+910000000002' })));
+  assert.match(own, /<Dial callerId="\+910000000002"/);
+  const foreign = await text(await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '910000000099', CallUUID: 'u-h2', 'X-VH-Caller-ID': '+910000000003' })));
+  assert.match(foreign, /<Dial callerId="\+910000000001"/);
+});
+
+// ─── webhooks route to the right account ─────────────────────────────────────
+test('outbound answer: identified by SIP user, dials with that account\'s chosen caller ID', async () => {
+  const a = await login(ONE, 'outa');
+  const b = await login(TWO, 'outb');
+  assert.equal((await req('/select-number', jsonPost({ number: '+910000000002' }, a.token))).status, 200);
+  assert.equal((await req('/select-number', jsonPost({ number: '+910000000001' }, b.token))).status, 400, 'not account two\'s number');
+
+  const xa = await text(await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '910000000099', CallUUID: 'u-out-a' })));
+  assert.match(xa, /<Record [^>]*recordSession="true"[^>]*\/>\s*<Dial /);
+  assert.match(xa, /<Dial callerId="\+910000000002"[^>]*action="https:\/\/backend\.example\.test\/dial-status"[^>]*redirect="false">/);
+  assert.match(xa, /<Number>910000000099<\/Number>/);
+
+  const xb = await text(await req('/answer', form({ From: `sip:${b.sipUser}@registrar.vobiz.ai`, To: '910000000098', CallUUID: 'u-out-b' })));
+  assert.match(xb, /<Dial callerId="\+910000000003"/);
+});
+
+test('outbound from an unknown SIP user is hung up, not dialled', async () => {
+  const xml = await text(await req('/answer', form({ From: 'sip:nobody@registrar.vobiz.ai', To: '910000000099', CallUUID: 'u-unk' })));
+  assert.match(xml, /<Hangup reason="rejected"\/>/);
+  assert.ok(!xml.includes('<Dial'));
+});
+
+test('inbound answer: rings the signed-in agents of the account that owns the DID', async () => {
+  const a1 = await login(ONE, 'inbound1');
+  const a2 = await login(ONE, 'inbound2');
+  const b = await login(TWO, 'inbound3');
+
+  const x1 = await text(await req('/answer', form({ From: '910000000097', To: '910000000001', CallUUID: 'u-in-1' })));
+  assert.match(x1, /<Dial callerId="\+910000000001" callerName="910000000097"/);
+  assert.ok(x1.includes(`<User>sip:${a1.sipUser}@registrar.vobiz.ai</User>`));
+  assert.ok(x1.includes(`<User>sip:${a2.sipUser}@registrar.vobiz.ai</User>`));
+  assert.ok(!x1.includes(b.sipUser), 'never rings another account\'s agent');
+
+  const x2 = await text(await req('/answer', form({ From: '910000000097', To: '+910000000003', CallUUID: 'u-in-2' })));
+  assert.match(x2, /<Dial callerId="\+910000000003"/);
+  assert.ok(x2.includes(`<User>sip:${b.sipUser}@registrar.vobiz.ai</User>`));
+  assert.ok(!x2.includes(a1.sipUser));
+});
+
+test('inbound: ParentAuthID picks the account, ahead of the dialled-number map', async () => {
+  const b = await login(TWO, 'parent');
+  // To is a number account TWO never listed, so only ParentAuthID can route it.
+  const xml = await text(await req('/answer', form({ From: '910000000097', To: '00000000099', CallUUID: 'u-pa', Direction: 'inbound', ParentAuthID: 'MA_TEST0002' })));
+  assert.ok(xml.includes(`<User>sip:${b.sipUser}@registrar.vobiz.ai</User>`));
+  assert.match(xml, /<Dial callerId="\+910000000099"/, '0XXXXXXXXXX (11 digits) becomes +91XXXXXXXXXX');
+});
+
+test('inbound to a number no signed-in account owns gets a polite hangup', async () => {
+  const xml = await text(await req('/answer', form({ From: '910000000097', To: '910000000050', CallUUID: 'u-in-x' })));
+  assert.match(xml, /<Speak>[^<]+<\/Speak>\s*<Hangup\/>/);
+  assert.ok(!xml.includes('<Dial'));
+  assert.match(serverOutput, /inbound to 910000000050: no signed-in account or SIP-direct agent has this number/);
+});
+
+test('Event=Hangup gets an empty Response', async () => {
+  const xml = await text(await req('/answer', form({ Event: 'Hangup', CallUUID: 'u-in' })));
+  assert.match(xml, /<Response><\/Response>/);
+});
+
+test('a caller ID cannot inject XML into the answer document', async () => {
+  const a = await login(ONE, 'inject');
+  const evil = '+1"/><Number>19005550100</Number></Dial><Dial callerId="+1';
+  assert.equal((await req('/select-number', jsonPost({ number: evil }, a.token))).status, 400);
+  assert.equal((await req('/login-sip', jsonPost({ sipUser: 'deskphone03', callerId: evil }))).status, 400);
+  const direct = await text(await req('/answer', form({ From: 'sip:deskphone03@registrar.vobiz.ai', To: '910000000099', CallUUID: 'u-x2', 'X-VH-Caller-ID': evil })));
+  assert.ok(!direct.includes('19005550100'));
+  const xml = await text(await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '910000000099', CallUUID: 'u-x', 'X-VH-Caller-ID': evil })));
+  assert.ok(!xml.includes('19005550100'));
+  assert.equal((xml.match(/<Dial /g) || []).length, 1);
+});
+
+test('a destination that is not a phone number is rejected, not dialled', async () => {
+  const a = await login(ONE, 'dest');
+  const xml = await text(await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '</Number><Number>1900', CallUUID: 'u-y' })));
+  assert.match(xml, /<Hangup reason="rejected"\/>/);
 });
 
 // ─── recordings ──────────────────────────────────────────────────────────────
@@ -97,7 +316,7 @@ test('recordings list and call records need a session', async () => {
 });
 
 test('/play-recording without a valid signature streams nothing', async () => {
-  for (const q of ['', '?callUuid=call-1', '?callUuid=call-1&exp=9999999999&sig=00']) {
+  for (const q of ['', '?callUuid=call-1', '?authId=MA_TEST0001&callUuid=call-1&exp=9999999999&sig=00']) {
     const r = await req(`/play-recording${q}`);
     assert.equal(r.status, 403, q);
   }
@@ -105,82 +324,65 @@ test('/play-recording without a valid signature streams nothing', async () => {
 
 test('/recording-audio without a valid signature streams nothing', async () => {
   assert.equal((await req('/recording-audio/rec-1')).status, 403);
-  assert.equal((await req('/recording-audio/rec-1?exp=9999999999&sig=00')).status, 403);
+  assert.equal((await req('/recording-audio/rec-1?authId=MA_TEST0001&exp=9999999999&sig=00')).status, 403);
 });
 
 test('no proxy route takes a caller-supplied URL', async () => {
   assert.equal((await req('/recording-file?url=https://example.com/')).status, 404);
 });
 
-test('signed panel link plays the recording; tampering breaks it', async () => {
-  const token = await login();
-  const list = await (await req('/recordings', { headers: { Authorization: `Bearer ${token}` } })).json();
-  const playUrl = new URL(list.objects[0].playUrl);
-  assert.ok(!playUrl.search.includes('test-auth-token'));
-  const ok = await req(playUrl.pathname + playUrl.search);
-  assert.equal(ok.status, 200);
-  assert.equal(await ok.text(), 'AUDIO:rec-1.mp3');
-  const tampered = playUrl.search.replace(/sig=([0-9a-f])/, (m, c) => `sig=${c === 'a' ? 'b' : 'a'}`);
-  assert.equal((await req(playUrl.pathname + tampered)).status, 403);
+test('signed panel links are account-scoped: each plays its own audio, swapping the account breaks it', async () => {
+  const a = await login(ONE, 'rec1');
+  const b = await login(TWO, 'rec2');
+  const la = await json(await req('/recordings', bearer(a.token)));
+  const lb = await json(await req('/recordings', bearer(b.token)));
+  const ua = new URL(la.objects[0].playUrl);
+  const ub = new URL(lb.objects[0].playUrl);
+  assert.equal(ua.searchParams.get('authId'), 'MA_TEST0001');
+  assert.equal(ub.searchParams.get('authId'), 'MA_TEST0002');
+
+  assert.equal(await text(await req(ua.pathname + ua.search)), 'AUDIO:rec-1.mp3');
+  assert.equal(await text(await req(ub.pathname + ub.search)), 'AUDIO:rec-2.mp3');
+
+  // Same signature, other account: refused.
+  const swapped = new URL(ua); swapped.searchParams.set('authId', 'MA_TEST0002');
+  assert.equal((await req(swapped.pathname + swapped.search)).status, 403);
+  // Tampered signature: refused.
+  const tampered = ua.search.replace(/sig=([0-9a-f])/, (m, c) => `sig=${c === 'a' ? 'b' : 'a'}`);
+  assert.equal((await req(ua.pathname + tampered)).status, 403);
+  // Audio was fetched with the owning account's credentials.
+  const media = fetched().filter(f => f.url.startsWith('https://media.vobiz.test/'));
+  assert.ok(media.some(f => f.url.endsWith('rec-1.mp3') && f.authToken === ONE.authToken));
+  assert.ok(media.some(f => f.url.endsWith('rec-2.mp3') && f.authToken === TWO.authToken));
 });
 
-test('ticket link is signed, credential-free, and plays only that call', async () => {
-  const token = await login();
-  await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '910000000099', CallUUID: 'call-1' }));
-  const rec = await (await req('/call-record?to=910000000099', { headers: { Authorization: `Bearer ${token}` } })).json();
+test('ticket link is signed over the account, credential-free, and plays only that call', async () => {
+  const a = await login(ONE, 'ticket');
+  await req('/answer', form({ From: `sip:${a.sipUser}@registrar.vobiz.ai`, To: '910000000091', CallUUID: 'call-1' }));
+  const rec = await json(await req('/call-record?to=910000000091', bearer(a.token)));
   assert.equal(rec.callUuid, 'call-1');
   const u = new URL(rec.recordingUrl);
   assert.equal(u.origin, 'https://backend.example.test');
+  assert.equal(u.searchParams.get('authId'), 'MA_TEST0001');
   assert.match(u.search, /exp=\d+&sig=[0-9a-f]{64}/);
-  assert.ok(!rec.recordingUrl.includes('test-auth-token'));
   const r = await req(u.pathname + u.search);
   assert.equal(r.status, 200);
-  assert.equal(await r.text(), 'AUDIO:rec-1.mp3', 'must pick the recording whose call_uuid matches, not items[0]');
+  assert.equal(await text(r), 'AUDIO:rec-1.mp3', 'must pick the recording whose call_uuid matches, not items[0]');
+
+  const swapped = new URL(u); swapped.searchParams.set('authId', 'MA_TEST0002');
+  assert.equal((await req(swapped.pathname + swapped.search)).status, 403);
 });
 
-// ─── VobizXML ────────────────────────────────────────────────────────────────
-test('outbound answer: browser A leg gets Record then Dial Number', async () => {
-  const r = await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '910000000099', CallUUID: 'u-out' }));
-  const xml = await r.text();
-  assert.match(xml, /<Record [^>]*recordSession="true"[^>]*\/>\s*<Dial /);
-  assert.match(xml, /<Dial callerId="\+910000000001"[^>]*action="https:\/\/backend\.example\.test\/dial-status"[^>]*redirect="false">/);
-  assert.match(xml, /<Number>910000000099<\/Number>/);
-});
-
-test('inbound answer: Dial User with callerId = dialled DID in E.164', async () => {
-  const xml = await (await req('/answer', form({ From: '910000000097', To: '910000000098', CallUUID: 'u-in' }))).text();
-  assert.match(xml, /<Dial callerId="\+910000000098" callerName="910000000097"/);
-  assert.match(xml, /<User>sip:testagent123@registrar\.vobiz\.ai<\/User>/);
-});
-
-test('Event=Hangup gets an empty Response', async () => {
-  const xml = await (await req('/answer', form({ Event: 'Hangup', CallUUID: 'u-in' }))).text();
-  assert.match(xml, /<Response><\/Response>/);
-});
-
-test('a caller ID cannot inject XML into the answer document', async () => {
-  const evil = '+1"/><Number>19005550100</Number></Dial><Dial callerId="+1';
-  const r = await req('/login-sip', jsonPost({ sipUser: 'testagent123', callerId: evil }));
-  assert.equal(r.status, 400);
-  const xml = await (await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '910000000099', CallUUID: 'u-x', 'X-VH-Caller-ID': evil }))).text();
-  assert.ok(!xml.includes('19005550100'));
-  assert.equal((xml.match(/<Dial /g) || []).length, 1);
-});
-
-test('a destination that is not a phone number is rejected, not dialled', async () => {
-  const xml = await (await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '</Number><Number>1900', CallUUID: 'u-y' }))).text();
-  assert.match(xml, /<Hangup reason="rejected"\/>/);
-});
-
-test('/login-sip only accepts numbers the account owns', async () => {
-  assert.equal((await req('/login-sip', jsonPost({ sipUser: 'testagent123', callerId: '+910000000099' }))).status, 400);
-  assert.equal((await req('/login-sip', jsonPost({ sipUser: 'testagent123', callerId: '+910000000002' }))).status, 200);
+test('another account cannot see this account\'s call records', async () => {
+  const b = await login(TWO, 'snoop');
+  const rec = await json(await req('/call-record?to=910000000091', bearer(b.token)));
+  assert.equal(rec.found, false);
 });
 
 // ─── Zendesk credentials ─────────────────────────────────────────────────────
 test('the Zendesk API token cannot be aimed at another host', async () => {
   const before = fetched().length;
-  const token = await login();
+  const { token } = await login();
   await req('/sync-call', jsonPost({ subdomain: 'evil.example/x?', email: 'a@b', apiToken: 'x', ticketId: 1 }, token));
   await req('/transcription-ready', {
     ...jsonPost({ subdomain: 'evil.example/x?', ticketId: 1, transcript: 'hi' }),
@@ -204,28 +406,46 @@ test('CORS: ZAF iframe origin allowed, others not echoed, never *', async () => 
   assert.equal(await acao('https://acme.zendesk.com.evil.example'), null);
 });
 
-// ─── setup ───────────────────────────────────────────────────────────────────
-test('/setup binds the endpoint but does not move the DID; /setup-inbound does, via the documented route', async () => {
-  const token = await login();
-  let mark = fetched().length;
-  assert.equal((await req('/setup', jsonPost({}, token))).status, 200);
-  let calls = fetched().slice(mark);
-  assert.ok(calls.some(c => c.url.endsWith('/Endpoint/EP1/') && JSON.parse(c.body).app_id === 'APP1'));
-  assert.ok(!calls.some(c => /\/numbers\/.+\/application$/.test(c.url)));
-  const created = calls.find(c => c.url.endsWith('/Application/') && c.method === 'POST');
-  assert.match(JSON.parse(created.body).app_name, /^[A-Za-z0-9_-]+$/);
-
-  mark = fetched().length;
-  assert.equal((await req('/setup-inbound', jsonPost({}, token))).status, 200);
-  calls = fetched().slice(mark);
-  const attach = calls.find(c => c.url.endsWith('/numbers/%2B910000000001/application'));
+// ─── inbound setup ───────────────────────────────────────────────────────────
+test('/setup-inbound attaches the selected number to the account\'s app via the documented route', async () => {
+  const a = await login(ONE, 'inb');
+  await req('/select-number', jsonPost({ number: '+910000000002' }, a.token));
+  const mark = fetched().length;
+  const r = await req('/setup-inbound', jsonPost({}, a.token));
+  assert.equal(r.status, 200);
+  const calls = fetched().slice(mark);
+  const attach = calls.find(c => c.url.endsWith('/Account/MA_TEST0001/numbers/%2B910000000002/application'));
   assert.ok(attach, 'number attach must use POST /numbers/{e164}/application');
-  assert.deepEqual(JSON.parse(attach.body), { application_id: 'APP1' });
+  assert.equal(attach.body, '{"application_id":"43919358318796814"}');
+  assert.equal(attach.authToken, ONE.authToken);
+
+  await req('/select-number', jsonPost({ number: '+910000000001' }, a.token));
+  const moved = await json(await req('/setup-inbound', jsonPost({}, a.token)));
+  assert.equal(moved.previousAppId, '20577609616603585');
+  assert.match(moved.message, /moved off application 20577609616603585/);
+});
+
+test('/setup-inbound needs a session', async () => {
+  assert.equal((await req('/setup-inbound', jsonPost({}))).status, 401);
 });
 
 test('static files are not served — no path traversal to .env', async () => {
-  for (const p of ['/../backend/.env', '/..%2fbackend%2f.env', '/.env', '/backend/.env']) {
+  for (const p of ['/../backend/.env', '/..%2fbackend%2f.env', '/.env', '/backend/.env', '/data/endpoints.json']) {
     const r = await fetch(`${BASE}${p}`);
     assert.equal(r.status, 404, p);
   }
+});
+
+// ─── the account Auth Token never leaves the backend ─────────────────────────
+test('no HTTP response and no log line ever contains an account Auth Token', async () => {
+  // A few more surfaces, so the check covers every route that returns data.
+  const a = await login(ONE, 'leak');
+  for (const p of ['/session', '/numbers', '/agent', '/recordings', '/call-record', '/health']) {
+    await text(await req(p, bearer(a.token)));
+  }
+  assert.ok(seenBodies.length > 30);
+  for (const body of seenBodies) {
+    for (const t of TOKENS) assert.ok(!body.includes(t), `token leaked in a response: ${body.slice(0, 120)}`);
+  }
+  for (const t of TOKENS) assert.ok(!serverOutput.includes(t), 'token leaked in the server log');
 });

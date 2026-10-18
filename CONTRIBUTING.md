@@ -9,7 +9,7 @@ Full walkthrough in [docs/install.md](docs/install.md). The short version:
 
 ```bash
 cd backend && npm install
-cp .env.example .env                   # needs a real SIP endpoint
+cp .env.example .env                   # deployment settings only — no Vobiz credentials
 npm start                              # → localhost:8092
 
 cloudflared tunnel --url http://localhost:8092
@@ -50,8 +50,16 @@ through `xmlEscape`, and numbers must be validated with `cleanPhone`.
 (`/answer`, `/dial-status`, `/recording-ready`) and signed playback links are
 public. Never add a `/:agentId` variant that skips the session.
 
-**Credentials or hosts taken from the request.** Zendesk and Vobiz credentials,
-and the hosts they are sent to, come from `.env` only.
+**Credentials or hosts taken from the request.** Zendesk credentials, and the
+hosts they are sent to, come from `.env` only. Vobiz credentials come from the
+agent's sign-in, are checked against Vobiz, and stay in backend memory.
+
+**A Vobiz account value in configuration or code.** No Auth ID, Auth Token, SIP
+credentials, caller ID, endpoint id or app id in `.env`, code or docs. Tests use
+obvious fakes (`MA_TEST0001`, `+910000000001`).
+
+**A Vobiz id through a JS number.** App ids are 17 digits, past
+`Number.MAX_SAFE_INTEGER`. Keep them strings end to end.
 
 **Anything sensitive in `localStorage`, `sessionStorage`, or a cookie.**
 
