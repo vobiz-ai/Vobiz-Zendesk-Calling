@@ -282,6 +282,9 @@ function handleAnswer(req, res) {
   // ours — so B-leg creation is refused silently and totally. Use the DID that
   // was actually dialled, normalised to E.164.
   const callerId = cleanPhone(toE164(to)) || FROM_NUMBER;
+  // callerId has to be our DID, so the browser would otherwise see our own
+  // number ringing. callerName carries the real caller for the panel's screen pop.
+  const callerName = cleanPhone(from);
   rememberCall({
     callUuid, direction: 'Inbound', agentSipUser: SIP_USER,
     from, to: callerId, startedAt: Date.now(),
@@ -290,7 +293,7 @@ function handleAnswer(req, res) {
   log(`  -> inbound from ${from}, bridging to sip:${SIP_USER}@${REGISTRAR} callerId=${callerId}`);
   return res.send(
     `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  ${recordXml}\n` +
-    `  <Dial callerId="${xmlEscape(callerId)}" timeout="30" timeLimit="14400" action="${dialStatusUrl}" method="POST" redirect="false">\n` +
+    `  <Dial callerId="${xmlEscape(callerId)}"${callerName ? ` callerName="${xmlEscape(callerName)}"` : ''} timeout="30" timeLimit="14400" action="${dialStatusUrl}" method="POST" redirect="false">\n` +
     `    <User>${xmlEscape(`sip:${SIP_USER}@${REGISTRAR}`)}</User>\n  </Dial>\n</Response>`
   );
 }

@@ -149,7 +149,7 @@ test('outbound answer: browser A leg gets Record then Dial Number', async () => 
 
 test('inbound answer: Dial User with callerId = dialled DID in E.164', async () => {
   const xml = await (await req('/answer', form({ From: '919811111111', To: '918000000002', CallUUID: 'u-in' }))).text();
-  assert.match(xml, /<Dial callerId="\+918000000002"/);
+  assert.match(xml, /<Dial callerId="\+918000000002" callerName="919811111111"/);
   assert.match(xml, /<User>sip:testagent123@registrar\.vobiz\.ai<\/User>/);
 });
 

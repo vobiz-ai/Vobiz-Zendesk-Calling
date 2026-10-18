@@ -644,6 +644,9 @@ async function acceptCall() {
     });
     setHangupVisible(true);
     setStatus("On a call", "busy");
+    if (client && resolvedUser && resolvedUser.id) {
+      try { client.invoke("routeTo", "user", resolvedUser.id); } catch { /* non-fatal */ }
+    }
   } catch (err) {
     console.error("[Vobiz] Could not answer incoming leg:", err);
     try { currentRTCSession.terminate(); } catch { /* ignore */ }
@@ -720,7 +723,12 @@ function startSipUA(sipUser, sipPassword, displayName) {
     vobizUA.on("newRTCSession", data => {
       if (data.originator !== "remote") return;
 
-      const remoteCaller = (data.session && data.session.remote_identity && data.session.remote_identity.uri && data.session.remote_identity.uri.user) || "Unknown caller";
+      // The backend dials us with callerId = its own DID (Vobiz requires an
+      // owned number) and the real caller in callerName, which arrives as the
+      // SIP display name. Prefer it when it looks like a phone number.
+      const identity = (data.session && data.session.remote_identity) || {};
+      const displayNumber = String(identity.display_name || "").replace(/[^\d+]/g, "");
+      const remoteCaller = (displayNumber.length >= 6 ? displayNumber : "") || (identity.uri && identity.uri.user) || "Unknown caller";
       callDirection = "Inbound";
       lastDialedNumber = remoteCaller;
       lastCallRecord = null;
@@ -737,6 +745,12 @@ function startSipUA(sipUser, sipPassword, displayName) {
       setStatus(`Incoming call from ${remoteCaller}`, "busy");
       showIncoming(remoteCaller);
       startRingtone();
+
+      // Screen pop: look the caller up so the agent sees who it is before
+      // answering; on accept, open their profile.
+      searchZendeskUser(remoteCaller).then(user => {
+        if (user && incomingPending) showIncoming(`${user.name} · ${remoteCaller}`);
+      });
 
       currentRTCSession.on("confirmed", () => {
         startTimer();
@@ -908,17 +922,21 @@ function hangUp() {
 
 function searchZendeskUser(phoneNumber) {
   resolvedUser = null;
-  if (!client) return;
+  if (!client) return Promise.resolve(null);
   const clean = String(phoneNumber).replace(/[^\d+]/g, "");
-  if (!clean) return;
+  if (!clean) return Promise.resolve(null);
 
-  client.request(`/api/v2/search.json?query=${encodeURIComponent(`type:user phone:${clean}`)}`)
+  return client.request(`/api/v2/search.json?query=${encodeURIComponent(`type:user phone:${clean}`)}`)
     .then(data => {
       if (data && data.results && data.results.length) {
         resolvedUser = data.results[0];
       }
+      return resolvedUser;
     })
-    .catch(err => console.warn("[Vobiz] Zendesk user search note:", err.message));
+    .catch(err => {
+      console.warn("[Vobiz] Zendesk user search note:", err.message);
+      return null;
+    });
 }
 
 async function findCurrentTicketId() {
