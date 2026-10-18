@@ -72,7 +72,8 @@
             </button>
           </div>
 
-          <!-- Signing in with the account. The backend holds the SIP identity. -->
+          <!-- Any Vobiz account. The backend checks the pair with Vobiz and sets up
+               this agent's own SIP endpoint inside that account. -->
           <div id="mode-account" role="tabpanel" aria-labelledby="mode-account-tab">
             <p class="step-help">
               Your Auth ID and Auth Token are on the
@@ -101,14 +102,16 @@
             </div>
           </div>
 
-          <!-- Signing in as one endpoint. Nothing account-wide is needed, and the
-               backend never sees or hands out these credentials. -->
+          <!-- Signing in as one existing endpoint. Nothing account-wide is needed,
+               and the backend never sees the SIP password. -->
           <div id="mode-sip" role="tabpanel" aria-labelledby="mode-sip-tab" hidden>
             <p class="step-help">
               The endpoint's own SIP credentials, from
               <a href="https://console.vobiz.ai" target="_blank" rel="noopener">Console</a> &rarr;
               Voice &rarr; Endpoints. Signs in as that one endpoint, without
-              account-wide credentials.
+              account-wide credentials. The endpoint and your number must be on a
+              Vobiz application whose answer URL is this backend's
+              <code>/answer</code>.
             </p>
 
             <div class="form-group">
@@ -130,6 +133,11 @@
               </p>
             </div>
 
+            <p id="sip-account-note" class="hint" hidden>
+              Recordings and "Enable inbound calls" need account access: sign in
+              with your Vobiz account to use them.
+            </p>
+
             <label class="check-row" for="sip-remember">
               <input type="checkbox" id="sip-remember" />
               <span class="check-text">
@@ -150,8 +158,8 @@
           <p id="vobiz-login-status" class="hint">Not signed in.</p>
         </section>
 
-        <!-- Step 2 — caller ID. Account mode only: picking from the account's
-             numbers needs account credentials. SIP direct types one instead. -->
+        <!-- Step 2 — caller ID. Account mode only: picked from the signed-in
+             account's own numbers. SIP direct types one instead. -->
         <section class="step" id="step-caller-id">
           <div class="step-head">
             <span class="step-num">2</span>
@@ -181,7 +189,7 @@
           <div id="dialbox">
             <div class="form-group">
               <label class="field-label" for="dialnumber">Number to call</label>
-              <input type="tel" id="dialnumber" class="input input-mono input-dial" placeholder="+91 98765 43210" />
+              <input type="tel" id="dialnumber" class="input input-mono input-dial" placeholder="E.164, e.g. +91…" />
             </div>
             <div class="actions">
               <button id="dialbtn" class="btn btn-primary" disabled>
@@ -206,15 +214,17 @@
         <audio id="vobiz-remote-audio" autoplay></audio>
 
         <!-- Optional — inbound -->
-        <section class="step step-optional">
+        <section class="step step-optional" id="step-inbound">
           <div class="step-head">
             <span class="step-num step-num-optional">+</span>
             <h2 class="step-title">Receive calls here</h2>
           </div>
           <p class="step-help">
             One-time setup. Points your selected Vobiz number at this panel so
-            inbound calls ring in the browser.
+            inbound calls ring in the browser. This moves the number off any
+            other Vobiz application it is attached to.
           </p>
+          <p id="inbound-move-note" class="hint"></p>
           <button id="setup-inbound-btn" class="btn btn-secondary">Enable inbound calls</button>
           <p id="inbound-setup-status" class="hint"></p>
         </section>

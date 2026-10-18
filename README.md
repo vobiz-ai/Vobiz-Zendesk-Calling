@@ -54,17 +54,26 @@ The browser carries the **audio**; the backend carries the **credentials**. Your
 Vobiz Auth Token is never exposed to a third party, and never written into a
 Zendesk ticket.
 
+**Any Vobiz account can sign in.** Nothing account-specific is configured on the
+backend. An agent types their Auth ID and Auth Token into the panel; the backend
+checks them with Vobiz and, inside that account, finds or creates this
+integration's application and one SIP endpoint for that agent, with a fresh SIP
+password for that browser session. Or use the **SIP direct** tab with an
+existing endpoint's own credentials (see
+[install](docs/install.md#sip-direct-setting-up-an-endpoint-by-hand)).
+
 **The browser is the A leg.** For an outbound call the panel sends the SIP
 INVITE itself; Vobiz fetches the backend's `/answer`, which returns
 `<Record>` then `<Dial><Number>` to reach the customer. Inbound calls to your
-number get `<Dial><User>` to the agent's SIP endpoint, and the panel rings. See
+number get `<Dial><User>` to the signed-in agents of the account that owns it
+(identified by the webhook's `ParentAuthID`), and the panel rings. See
 [architecture](docs/architecture.md#an-outbound-call-end-to-end).
 
 ## Quick start
 
 Requires **Node 18+**, a [Zendesk](https://www.zendesk.com) account with admin
-access, and a [Vobiz](https://console.vobiz.ai) account with at least one phone
-number.
+access, and a [Vobiz](https://console.vobiz.ai) account (any account) with at
+least one active voice number.
 
 ```bash
 git clone https://github.com/vobiz-ai/Vobiz-Zendesk-Calling.git
@@ -73,7 +82,7 @@ cd Vobiz-Zendesk-Calling
 # 1. backend
 cd backend
 npm install
-cp .env.example .env                   # Vobiz + SIP endpoint + Zendesk values
+cp .env.example .env                   # PUBLIC_BASE, SIGNING_SECRET, optional Zendesk token
 npm start                              # → http://localhost:8092
 
 # 2. expose it, so Vobiz can reach the answer webhook
@@ -91,8 +100,10 @@ Then open Zendesk with the apps server attached:
 https://<your-subdomain>.zendesk.com/agent/dashboard?zcli_apps=true
 ```
 
-The softphone appears in the top bar. Full walkthrough, including creating the
-SIP endpoints: **[docs/install.md](docs/install.md)**.
+The softphone appears in the top bar. Sign in with any Vobiz account's Auth ID
+and Auth Token, pick a caller ID from your numbers, and call. To receive calls,
+click **Enable inbound calls** once — that moves the selected number onto this
+integration's application. Full walkthrough: **[docs/install.md](docs/install.md)**.
 
 ## Repository layout
 
@@ -118,21 +129,27 @@ Set in **Zendesk → Admin Center → Apps → Vobiz Calling App → Settings**:
 | `agent_id` | yes | A label for this agent, shown in the panel |
 | `registrar_url` | no | Defaults to `wss://registrar.vobiz.ai:5063/` |
 
-Everything else — Vobiz credentials, the SIP endpoint, Zendesk API
-credentials — lives in `backend/.env`; see
-[`.env.example`](backend/.env.example). The one value worth setting deliberately
-is `SIGNING_SECRET`; without it, recording links break on restart.
+`backend/.env` holds deployment settings only — `PORT`, `PUBLIC_BASE`,
+`SIGNING_SECRET`, `DATA_DIR`, and the optional Zendesk API credentials; see
+[`.env.example`](backend/.env.example). **No Vobiz Auth ID, Auth Token, SIP
+credentials or phone number goes there.** Set `SIGNING_SECRET` deliberately;
+without it, recording links break on restart.
+
+After a backend restart, Auth Tokens are gone from memory: agents sign in again,
+and a ticket recording link answers "sign in again" until someone from that
+account has.
 
 ## Security
 
 - **No credentials in URLs, and none in Zendesk tickets.** Recording links are
   HMAC-signed and expiring; they carry no Vobiz or Zendesk credentials.
-- **Credentials stay on the backend.** The Vobiz Auth Token, the SIP password
-  and the Zendesk API token are read from `backend/.env`. Signing in exchanges
-  the Auth ID and Auth Token for an opaque session token held in
-  `sessionStorage`; the SIP identity is served only to a signed-in session.
-- **Everything interpolated into VobizXML is validated and escaped.** Caller IDs
-  must be numbers the account owns.
+- **Credentials stay on the backend.** Signing in exchanges the Auth ID and Auth
+  Token for an opaque session token held in `sessionStorage`. The Auth Token is
+  kept in backend memory only — never returned, logged or written to disk. The
+  SIP identity is served only to a signed-in session. Recording links are signed
+  over the account, so one account's link cannot play another's audio.
+- **Everything interpolated into VobizXML is validated and escaped.** In account
+  mode the caller ID must be one of that account's active voice numbers.
 - **CORS is scoped** to Zendesk's app origins (`*.apps.zdusercontent.com`,
   `*.zendesk.com`) plus anything listed in `ALLOWED_ORIGINS` — never `*`.
 - The webhook routes Vobiz calls (`/answer`, `/dial-status`,

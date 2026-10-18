@@ -3,6 +3,25 @@
 The browser is the A leg: the panel places the call itself, and the backend
 only tells Vobiz where to connect it.
 
+## Any account, provisioned at sign-in
+
+Nothing account-specific is configured on the backend. On **Vobiz account**
+sign-in the backend verifies the Auth ID and Auth Token with Vobiz, then inside
+that account finds or creates this integration's application (answer URL
+`PUBLIC_BASE/answer`) and one SIP endpoint for the agent, sets a fresh SIP
+password that only that browser session receives, and binds the endpoint to the
+application. The Auth Token stays in backend memory, keyed by Auth ID.
+
+The webhooks are multi-tenant: an outbound `/answer` is matched to its agent
+and account by the SIP username in `From`; an inbound one by `ParentAuthID`
+(falling back to which account owns the dialled number).
+
+**SIP direct** is the other tab: the agent types an existing endpoint's SIP
+credentials and a caller ID. The backend never sees the password and has no
+account credentials; it only maps that SIP username to the caller ID. The
+endpoint and number must be bound by hand to an application pointing at this
+backend.
+
 ## An outbound call, end to end
 
 1. The agent clicks **Call**, or clicks a number in Zendesk.
@@ -20,8 +39,10 @@ then bridging the browser in with `<Dial><User>` does not connect.
 ## An inbound call
 
 A PSTN caller reaches a DID pointed at the same `/answer`. `From` is a plain
-number rather than a `sip:` URI, so the backend answers with `<Dial><User>`
-naming the agent's SIP endpoint, with `callerName` set to the real caller. The
+number rather than a `sip:` URI, so the backend finds the account
+(`ParentAuthID`, else the owner of the dialled number) and answers with
+`<Dial><User>` naming every signed-in agent's SIP endpoint in that account,
+with `callerName` set to the real caller. The
 panel rings, looks the caller up in Zendesk, and the agent accepts (Enter) or
 declines (Escape).
 
@@ -66,4 +87,4 @@ bindTrack(session.connection);   // no-op on the incoming path
 | Screen pop | `GET /api/v2/search.json?query=type:user phone:…` while ringing, then `routeTo` the user on answer |
 | Ticket context | A `ticket_sidebar` instance — `top_bar` has no page context of its own |
 | Call log | A private comment on the open ticket, or a new solved ticket |
-| Recording | A short-lived HMAC-signed link, minted server-side |
+| Recording | An HMAC-signed, expiring link over the account and the call, minted server-side |
