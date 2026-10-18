@@ -610,7 +610,8 @@ async function bindEndpointToApp({ attachNumber = false } = {}) {
   let appId = existing && (existing.app_id || existing.id);
   if (!appId) {
     const created = await vobiz('POST', '/Application/', {
-      // Letters, digits, '-' and '_' only — spaces and brackets are rejected.
+      // The documented rule is letters, digits, '-' and '_'. Names with spaces have
+      // been accepted in practice; stay inside the documented rule anyway.
       app_name: 'Zendesk-Calling-Vobiz',
       answer_url: answerUrl, answer_method: 'POST',
       hangup_url: answerUrl, hangup_method: 'POST',
