@@ -1,14 +1,17 @@
 <!--
-  Top bar icon.
+  Top bar icon: the Vobiz mark, monochrome.
 
   The filename is load-bearing: Zendesk reads assets/icon_top_bar.svg for a
-  top_bar app and nothing else. This file used to be called icon.svg, which the
-  product ignores, so the panel rendered with no icon at all.
+  top_bar app and nothing else. Zendesk scales it to 18x18 inside a 30x30
+  rounded box and tints it for the bar's state, so it is a single colour
+  (currentColor), no gradients or shadows, on a square viewBox.
 
-  Marketplace guidance for this slot: SVG only, monochrome, no gradients or
-  shadows, square artboard, legible at 18x18 inside a 30x30 rounded box.
-  currentColor lets Zendesk tint it for light and dark chrome.
+  Geometry is the Vobiz mark (42x30, see tools/make-brand-assets.py), centred
+  on a 48x48 square with a little padding:
+    ring sector  centre (42,30), outer r 30, inner r 15, upper-left quadrant
+    sector       centre (0,15),  r 15,                   upper-right quadrant
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
-  <path fill="currentColor" d="M12 2a8 8 0 0 0-8 8v4.5A2.5 2.5 0 0 0 6.5 17H8a1 1 0 0 0 1-1v-4a1 1 0 0 0-1-1H6v-1a6 6 0 0 1 12 0v1h-2a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h2v.5a1.5 1.5 0 0 1-1.5 1.5H13a1 1 0 0 0 0 2h3.5A3.5 3.5 0 0 0 20 17.5V10a8 8 0 0 0-8-8z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-3 -9 48 48" width="18" height="18">
+  <path fill="currentColor" d="M12 30A30 30 0 0 1 42 0V15A15 15 0 0 0 27 30Z"/>
+  <path fill="currentColor" d="M0 15V0A15 15 0 0 1 15 15Z"/>
 </svg>

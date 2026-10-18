@@ -1,0 +1,17 @@
+# zcli apps:package / apps:server zip everything under the app root that is not
+# listed here (dotfiles excluded). The app root is the repository root, so the
+# backend, its node_modules and any local config would otherwise be uploaded to
+# Zendesk. Directory entries need /** to match their contents.
+backend/**
+docs/**
+scripts/**
+tools/**
+tmp/**
+*.md
+*.zip
+package.json
+package-lock.json
+zcli.apps.config.json
+zcli.apps.config.json.example
+settings.json
+LICENSE

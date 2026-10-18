@@ -10,102 +10,78 @@ it. We will acknowledge your report and keep you updated.
 
 ## What this software protects, and what it does not
 
-Be clear-eyed about this before deploying. The list below is honest rather than
-reassuring.
-
 ### What is handled
 
-**Credentials never reach a Zendesk ticket.** A recording link written into a
-ticket is readable by every agent, every export, and every audit log,
-permanently. Links therefore carry an AES-256-GCM sealed token with an expiry —
-not your Vobiz Auth Token.
+**Credentials live on the backend.** The Vobiz Auth Token, the SIP endpoint
+password and the Zendesk API token are read from `backend/.env`. Signing in to
+the panel checks the agent's Auth ID and Auth Token against that file and
+returns an opaque session token, held in `sessionStorage`. Nothing the browser
+holds can be replayed against the Vobiz API.
 
-**The call-flow webhook escapes its inputs.** `/call-answer` returns XML that
-the telephony platform *executes*. Every interpolated value is escaped, and the
-caller ID is emitted only when it is a dialable number. Unescaped input here
-would let a caller inject arbitrary verbs into a live call flow.
+**The SIP identity is behind the session.** `GET /agent` returns the SIP
+username and password only to a signed-in session. There is no per-agent-id
+variant.
 
-**Credentials are not stored at rest.** Agents sign in through the panel; their
-Vobiz credentials are sent per request and held in their own browser session.
-The backend keeps no session store.
+**Recording links carry no credentials.** Links are HMAC-SHA256 signed with
+`SIGNING_SECRET` and expire: `RECORDING_URL_TTL_SECONDS` (default 5 minutes)
+for links in the panel, `TICKET_RECORDING_LINK_TTL_SECONDS` (default 7 days)
+for links written into ticket comments. The audio is fetched from Vobiz
+server-side. No route accepts a caller-supplied URL.
 
-**Failures are reported honestly.** A failed hangup returns a non-2xx, and a
-missing recording returns 404 rather than a 200 carrying an HTML page.
+**Zendesk credentials cannot be redirected.** The Zendesk subdomain, email and
+token come only from `.env`, and the subdomain is validated as a bare label
+before it is placed in a URL.
+
+**The answer webhook validates and escapes its inputs.** `/answer` returns XML
+that Vobiz executes. Destinations and caller IDs must be plain phone numbers;
+a caller ID chosen in the panel must be a number the account owns; every
+interpolated value is XML-escaped.
+
+**CORS is scoped.** Only Zendesk's app origins (`*.apps.zdusercontent.com`,
+`*.zendesk.com`, `*.zdassets.com`), localhost, and origins listed in
+`ALLOWED_ORIGINS` receive an `Access-Control-Allow-Origin` header. Never `*`.
+
+**Nothing changes on your Vobiz account at boot.** `POST /setup` (run when an
+agent signs in) creates the application and binds the SIP endpoint.
+`POST /setup-inbound` (the panel's **Enable inbound calls** button) additionally
+attaches `VOBIZ_FROM_NUMBER` to that application — which detaches it from any
+other application.
+
+These behaviours are covered by `backend/test/` and run in CI.
 
 ### What is NOT handled
 
-#### The backend is unauthenticated
+**Vobiz webhooks are not signature-checked.** `/answer`, `/dial-status` and
+`/recording-ready` must be reachable by Vobiz and accept any caller. Someone who
+knows the backend URL can post fake call events into the in-memory call ledger
+(which only affects call-log metadata), but cannot obtain credentials or place
+calls through them.
 
-**Every route is open.** There is no API key, no bearer token, no signature
-check. Identity is whatever `agentId` the caller sends, and that value is
-guessable.
+**One backend, one Vobiz account, one SIP endpoint.** Every agent who signs in
+to a backend registers as the same SIP endpoint. For several agents, run one
+backend per agent or extend the backend with per-agent endpoints.
 
-Anyone who can reach the backend can:
+**The SIP password reaches the browser.** WebRTC registration needs it. It is
+served only to a signed-in session, over HTTPS, and is never stored in
+`localStorage`. The SIP-direct sign-in option remembers the username and caller
+ID only, never the password.
 
-- read an agent's SIP credentials from `GET /agent/:agentId` and register as
-  them,
-- place calls billed to any account whose credentials they also have,
-- write comments and create tickets via `/sync-call`, if the backend holds
-  Zendesk credentials.
+**Session state is in memory.** Restarting the backend signs everyone out.
 
-Mitigate by keeping the backend **off the public internet**, except for the
-webhook paths Vobiz must reach (`/call-answer`). Put it behind your VPN, an
-allowlist, or a reverse proxy that authenticates everything else.
-
-A production deployment should add per-agent authentication. Pull requests
-welcome.
-
-#### CORS is wide open
-
-`Access-Control-Allow-Origin: *`. Combined with the above, any web page an agent
-visits can call this backend. Scope it to your Zendesk subdomain before
-deploying.
-
-#### SIP passwords are served to the browser
-
-The softphone registers with a real SIP password, which means the backend must
-hand it to the browser in cleartext over `GET /agent/:agentId`. Short-lived
-credentials would be better; the Vobiz endpoint API does not currently offer
-them.
-
-#### Agent credentials pass through the backend
-
-Agents type their Vobiz Auth ID and Token into the panel, which posts them to
-the backend on each request. Serve the backend over HTTPS only, and treat it as
-a system that handles credentials.
-
-#### Quick tunnels are not a deployment
-
-`trycloudflare.com` and similar hostnames are **recycled**. A link pointing at
-an expired tunnel resolves to whoever holds that name next. Never leave a quick
-tunnel in a Zendesk app setting beyond development.
+**Quick tunnels are not a deployment.** `trycloudflare.com` and similar
+hostnames are recycled. A setting pointing at an expired tunnel resolves to
+whoever holds that name next. Use a named tunnel or a real host for anything
+beyond a local test.
 
 ## Hardening checklist
 
 Before running this against real customers:
 
-- [ ] Add authentication to every backend route
-- [ ] Scope CORS to your Zendesk subdomain
-- [ ] Set `RECORDING_TOKEN_SECRET` to a stable, secret value
-- [ ] Serve the backend over HTTPS with a stable hostname
-- [ ] Give every agent their own `agent_id` and SIP endpoint
-- [ ] Confirm `backend/agents.json` and `backend/.env` are gitignored
+- [ ] Serve the backend over HTTPS on a stable hostname
+- [ ] Set `SIGNING_SECRET` to a stable random value (`openssl rand -hex 32`)
+- [ ] Keep `backend/.env` and `zcli.apps.config.json` out of version control
+      (both are gitignored)
+- [ ] Leave `TRANSCRIPTION_WEBHOOK_SECRET` blank unless you use that webhook
+- [ ] Restrict `ALLOWED_ORIGINS` to what you actually need
 - [ ] Rotate any credential that has appeared in a shell history, a log, or a
       screenshot
-
-## A note on `.env.example`
-
-This repository ships `backend/.env.example` with **every value blank**, and
-`.gitignore` is written so that `.env` is ignored while `.env.example` is
-tracked.
-
-That distinction is easy to get wrong. A pattern of `*.env` does **not** match
-`.env.example`, because that filename ends in `.example`. If you add config
-files, verify with:
-
-```bash
-git check-ignore -v backend/.env          # should be ignored
-git check-ignore -v backend/.env.example  # should NOT be ignored
-```
-
-Never put a working credential in a file named `.example`.

@@ -1,9 +1,7 @@
 # Architecture
 
-> **Rewritten 17 September 2026.** This document used to describe the backend
-> originating calls over the REST API and bridging the agent's browser in with
-> `<Dial><User>`. That design cannot work — routing *into* a registered WebRTC
-> endpoint is blocked platform-side. The browser is now the A leg.
+The browser is the A leg: the panel places the call itself, and the backend
+only tells Vobiz where to connect it.
 
 ## An outbound call, end to end
 
@@ -16,39 +14,29 @@
 5. Vobiz dials the customer and bridges the two legs.
 6. `/dial-status` receives the result; `/recording-ready` receives the file.
 
-The order cannot be reversed. The Vobiz REST API cannot originate a call to a
-registered WebRTC endpoint, and `<Dial><User>` into one was blocked
-platform-side for the two weeks before this was written.
+The order cannot be reversed: originating to the customer over the REST API and
+then bridging the browser in with `<Dial><User>` does not connect.
 
 ## An inbound call
 
 A PSTN caller reaches a DID pointed at the same `/answer`. `From` is a plain
 number rather than a `sip:` URI, so the backend answers with `<Dial><User>`
-naming the agent's SIP endpoint, and the panel auto-answers.
+naming the agent's SIP endpoint, with `callerName` set to the real caller. The
+panel rings, looks the caller up in Zendesk, and the agent accepts (Enter) or
+declines (Escape).
 
 `callerId` is mandatory here. Omit it and Vobiz derives it from the A leg —
 which on an inbound call is the *caller's* number, not one this account owns —
 so B-leg creation is refused silently and the browser never rings. The backend
 uses the DID that was actually dialled, normalised to E.164.
 
-This path was blocked platform-side and was observed working on 17 Sep 2026;
-see [`../ISSUES.md`](../ISSUES.md) #1 for what is and is not proven.
 
 ## Why the browser must be the A leg
 
-`<Dial><User>` to a registered WebRTC endpoint made `vobiz-outboundsip` build a
-gateway URI it could not itself parse, and it dropped its own INVITE:
-
-```
-ERROR: tr_eval_uri(): invalid uri [user@…-webrtc-3.vobiz.ai:7032;…;contact=sip:…]
-INVITE|blocking gw: …
-```
-
-510 occurrences in 14 days, across accounts, including Vobiz's own SDK. The
-customer answered, heard ringback, then "the agent could not be reached".
-
-Dialling *out* of a registered endpoint was never affected, which is why this
-design works.
+Bridging *into* a registered WebRTC endpoint from an outbound REST call fails
+platform-side: the customer answers, hears ringback, then "the agent could not
+be reached". Dialling *out* of a registered endpoint is not affected, which is
+why the panel sends the INVITE and the backend answers with `<Dial><Number>`.
 
 ## Binding inbound audio
 
@@ -75,7 +63,7 @@ bindTrack(session.connection);   // no-op on the incoming path
 
 | Capability | How |
 | --- | --- |
-| Screen pop | `GET /api/v2/search.json?query=type:user phone:…`, then `routeTo` |
+| Screen pop | `GET /api/v2/search.json?query=type:user phone:…` while ringing, then `routeTo` the user on answer |
 | Ticket context | A `ticket_sidebar` instance — `top_bar` has no page context of its own |
 | Call log | A private comment on the open ticket, or a new solved ticket |
 | Recording | A short-lived HMAC-signed link, minted server-side |

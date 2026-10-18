@@ -8,6 +8,23 @@
  */
 
 /**
+ * The base URL every request is built on. The subdomain is validated because it
+ * is interpolated into a URL that carries the account's API token: anything but
+ * a bare subdomain label could redirect that token to another host.
+ */
+function zendeskBase(subdomain) {
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/i.test(String(subdomain || ''))) {
+    throw new Error('ZENDESK_SUBDOMAIN must be a bare subdomain such as "acme", not a URL');
+  }
+  return `https://${subdomain}.zendesk.com`;
+}
+
+function ticketPath(ticketId) {
+  if (!/^\d+$/.test(String(ticketId))) throw new Error('ticketId must be numeric');
+  return String(ticketId);
+}
+
+/**
  * Creates Basic Auth header for Zendesk API calls using Email + API Token
  */
 function getAuthHeader(email, apiToken) {
@@ -64,7 +81,7 @@ async function syncCallToZendesk({
     headers['Authorization'] = authHeader;
   }
 
-  const baseUrl = `https://${subdomain}.zendesk.com`;
+  const baseUrl = zendeskBase(subdomain);
   const callDurationSec = parseInt(duration, 10) || 0;
   const startedAt = new Date().toISOString();
 
@@ -73,7 +90,7 @@ async function syncCallToZendesk({
   // Option B Strategy 1: Inject Voice Comment into an existing Ticket
   if (ticketId) {
     try {
-      const voiceCommentUrl = `${baseUrl}/api/v2/tickets/${ticketId}/voice_comment.json`;
+      const voiceCommentUrl = `${baseUrl}/api/v2/tickets/${ticketPath(ticketId)}/voice_comment.json`;
       const voiceCommentBody = {
         voice_comment: {
           from: fromNumber || 'Unknown',
@@ -163,7 +180,7 @@ async function syncCallToZendesk({
                   `Notes: ${notes || 'No notes provided.'}`;
 
   if (ticketId) {
-    const updateUrl = `${baseUrl}/api/v2/tickets/${ticketId}.json`;
+    const updateUrl = `${baseUrl}/api/v2/tickets/${ticketPath(ticketId)}.json`;
     const res = await fetch(updateUrl, {
       method: 'PUT',
       headers,
@@ -234,7 +251,7 @@ async function appendTranscription({
     headers['Authorization'] = authHeader;
   }
 
-  const updateUrl = `https://${subdomain}.zendesk.com/api/v2/tickets/${ticketId}.json`;
+  const updateUrl = `${zendeskBase(subdomain)}/api/v2/tickets/${ticketPath(ticketId)}.json`;
   const transcriptBody = `[Vobiz AI Conversation Transcript${callId ? ` - Call #${callId}` : ''}]\n\n${transcript}`;
 
   console.log(`[Zendesk Service] Appending AI transcript to Zendesk ticket #${ticketId}`);

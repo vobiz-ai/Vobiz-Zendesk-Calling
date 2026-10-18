@@ -9,46 +9,49 @@ Full walkthrough in [docs/install.md](docs/install.md). The short version:
 
 ```bash
 cd backend && npm install
-cp .env.example .env
-cp agents.json.example agents.json     # needs a real SIP endpoint
+cp .env.example .env                   # needs a real SIP endpoint
 npm start                              # → localhost:8092
 
 cloudflared tunnel --url http://localhost:8092
 
-cd ../zendesk-app
+cd ..                                  # the app lives at the repository root
 cp zcli.apps.config.json.example zcli.apps.config.json
 npx @zendesk/zcli apps:server
 ```
 
 Then `https://<subdomain>.zendesk.com/agent/dashboard?zcli_apps=true`.
 
-**You need a real Vobiz account to exercise the call path.** There is no mock
-telephony backend; a call either happens or it does not.
+**You need a real Vobiz account to exercise the call path.** `npm test` covers
+the backend's HTTP behaviour with the network intercepted, but not a real call.
 
 ## Before opening a pull request
 
 ```bash
+npm test              # backend behaviour and security regressions
 npm run lint          # syntax check across backend and app
 npm run check:secrets # no credentials, tokens, or real numbers in the diff
-npx @zendesk/zcli apps:validate ./zendesk-app
+npx @zendesk/zcli apps:validate .   # needs `zcli login`
 ```
 
-CI runs all three. If you changed the call path, say in the pull request how
+CI runs the first three. If you changed the call path, say in the pull request how
 you tested it and what the CDR showed.
 
 ## Things that will be sent back
 
 **Credentials in a URL that gets stored.** Recording links end up in ticket
 bodies, which are exported, searched, and audited forever. Seal them or sign
-them. See `sealRecordingToken` in `backend/server.js`.
+them. See `signRecordingUrl` / `signCallRecordingUrl` in `backend/server.js`.
 
-**Unescaped interpolation into the VXML response.** `/call-answer` returns XML
+**Unescaped interpolation into the VobizXML response.** `/answer` returns XML
 that the telephony platform *executes*. Everything that goes into it must pass
-through `escapeXml`, and routing values must be validated with `isDialable`.
+through `xmlEscape`, and numbers must be validated with `cleanPhone`.
 
-**Re-sending credentials to a different host on failure.** A previous build
-retried `/start-call` against a hardcoded fallback host, carrying the agent's
-Auth Token with it. Fail loudly instead.
+**A route that answers without a session.** Only the Vobiz webhooks
+(`/answer`, `/dial-status`, `/recording-ready`) and signed playback links are
+public. Never add a `/:agentId` variant that skips the session.
+
+**Credentials or hosts taken from the request.** Zendesk and Vobiz credentials,
+and the hosts they are sent to, come from `.env` only.
 
 **Anything sensitive in `localStorage`, `sessionStorage`, or a cookie.**
 
@@ -63,8 +66,8 @@ missing recording, makes real failures invisible. Report the real status.
 - No build step, no framework, no bundler. Plain browser JavaScript and a small
   Express server.
 - Comments explain **why**, not what. The three worth reading before you edit
-  the call path: the customer-dialled-first ordering, the `peerconnection`
-  audio binding, and the cold-cache branch in `/call-answer`. Each looks wrong
+  the call path: the browser-as-A-leg ordering, the `peerconnection` audio
+  binding, and `action` + `redirect="false"` on `<Dial>`. Each looks wrong
   until you know the failure it prevents.
 - User-facing strings are sentences and say what to do next.
 - Keep `docs/backend-contract.md` in step with the routes. If you add, rename,
@@ -76,10 +79,12 @@ missing recording, makes real failures invisible. Report the real status.
 | --- | --- |
 | `backend/server.js` | Routes, the VXML webhook, the recording proxy |
 | `backend/zendeskService.js` | Everything that writes into Zendesk |
-| `zendesk-app/assets/scripts/app.js` | The softphone. The large one. |
-| `zendesk-app/assets/scripts/background.js` | Click-to-dial relay only |
-| `zendesk-app/assets/sidebar.html` | Exists solely to resolve ticket context |
-| `zendesk-app/manifest.json` | Locations and settings. Settings must be declared here to be readable at runtime. |
+| `backend/test/` | `npm test` — boots the backend with fetch intercepted |
+| `assets/scripts/app.js` | The softphone. The large one. |
+| `assets/scripts/background.js` | Click-to-dial relay only |
+| `assets/sidebar.html` | Resolves ticket context and offers a Call button |
+| `manifest.json` | Locations and settings. Settings must be declared here to be readable at runtime. |
+| `.zcliignore` | Keeps everything but `manifest.json`, `assets/` and `translations/` out of the app zip |
 
 ## Commit messages
 

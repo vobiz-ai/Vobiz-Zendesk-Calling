@@ -12,6 +12,7 @@
   },
   "scripts": {
     "start": "node backend/server.js",
+    "test": "npm --prefix backend test",
     "lint": "node scripts/lint.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
     "validate:app": "zcli apps:validate .",
