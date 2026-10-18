@@ -26,11 +26,8 @@
 | **Transcripts** | An optional webhook appends an AI transcript to the ticket as a private comment. |
 | **Browser audio** | Calls run over WebRTC in the tab. No desk phone, no desktop app. |
 
-**Verified end to end on 17 September 2026** on a live account: outbound
-connected and billed, session recordings delivered, and inbound PSTN → browser
-connected too — B leg answered, 12 seconds billed, confirmed in the CDR rather
-than the UI. Inbound had been blocked platform-side for the two weeks before
-that; read [`ISSUES.md`](ISSUES.md) #1 before relying on it.
+Outbound and inbound calls both run in the agent's browser, and both are
+recorded.
 
 ## How it fits together
 
@@ -57,11 +54,11 @@ The browser carries the **audio**; the backend carries the **credentials**. Your
 Vobiz Auth Token is never exposed to a third party, and never written into a
 Zendesk ticket.
 
-**Outbound call order is load-bearing.** The backend dials the *customer* first,
-then bridges the agent's registered browser in via `<Dial><User>`. The reverse
-does not work — the Vobiz REST API cannot originate a call to a registered
-WebRTC endpoint. This is also why the person you call hears a couple of seconds
-of ringback after answering. See [architecture](docs/architecture.md#an-outbound-call-end-to-end).
+**The browser is the A leg.** For an outbound call the panel sends the SIP
+INVITE itself; Vobiz fetches the backend's `/answer`, which returns
+`<Record>` then `<Dial><Number>` to reach the customer. Inbound calls to your
+number get `<Dial><User>` to the agent's SIP endpoint, and the panel rings. See
+[architecture](docs/architecture.md#an-outbound-call-end-to-end).
 
 ## Quick start
 
@@ -76,14 +73,14 @@ cd Vobiz-Zendesk-Calling
 # 1. backend
 cd backend
 npm install
-cp .env.example .env
-cp agents.json.example agents.json     # add a SIP endpoint per agent
+cp .env.example .env                   # Vobiz + SIP endpoint + Zendesk values
 npm start                              # → http://localhost:8092
 
 # 2. expose it, so Vobiz can reach the answer webhook
 cloudflared tunnel --url http://localhost:8092
 
-# 3. the Zendesk app
+# 3. the Zendesk app (from the repository root)
+cd ..
 cp zcli.apps.config.json.example zcli.apps.config.json   # paste the tunnel URL
 npx @zendesk/zcli apps:server
 ```
@@ -103,7 +100,8 @@ SIP endpoints: **[docs/install.md](docs/install.md)**.
 | --- | --- |
 | `backend/server.js` | The bridge: call control, the Vobiz answer webhook, the recording proxy |
 | `backend/zendeskService.js` | Writes call logs and transcripts into Zendesk |
-| `backend/agents.json.example` | Template mapping agent identities to SIP endpoints |
+| `backend/.env.example` | Every backend setting, documented |
+| `backend/test/` | Backend behaviour and security regression tests (`npm test`) |
 | `manifest.json` | ZAF v2 manifest — three locations, three settings |
 | `assets/index.html` | The softphone UI (`top_bar`) |
 | `assets/sidebar.html` | Resolves which ticket is open (`ticket_sidebar`) |
@@ -117,29 +115,29 @@ Set in **Zendesk → Admin Center → Apps → Vobiz Calling App → Settings**:
 | Setting | Required | Purpose |
 | --- | --- | --- |
 | `backend_url` | yes | Public HTTPS base URL of your backend |
-| `agent_id` | yes | Which entry in `agents.json` this agent is. **One per agent.** |
-| `zendesk_subdomain` | no | Only if the backend writes call logs instead of the app |
-| `zendesk_email` | no | Paired with the API token |
-| `zendesk_api_token` | no | Stored as a **secure** setting |
+| `agent_id` | yes | A label for this agent, shown in the panel |
+| `registrar_url` | no | Defaults to `wss://registrar.vobiz.ai:5063/` |
 
-Backend environment lives in `backend/.env` — see
+Everything else — Vobiz credentials, the SIP endpoint, Zendesk API
+credentials — lives in `backend/.env`; see
 [`.env.example`](backend/.env.example). The one value worth setting deliberately
-is `RECORDING_TOKEN_SECRET`; without it, recording links break on restart.
+is `SIGNING_SECRET`; without it, recording links break on restart.
 
 ## Security
 
-- **No credentials in the browser's URL bar, and none in Zendesk tickets.**
-  Recording links carry an AES-256-GCM sealed token with an expiry, not your
-  Auth Token.
-- **The VXML webhook escapes everything** it interpolates. Caller-ID values are
-  validated as dialable before they reach the call flow.
-- **Agent credentials are never stored server-side.** They are sent per request
-  and held only in the agent's own browser session.
-
-Known gaps are listed honestly in [SECURITY.md](SECURITY.md) — most importantly,
-**the backend's endpoints are unauthenticated**, so it must not be exposed to
-the public internet beyond the webhook paths Vobiz needs. Read that file before
-deploying.
+- **No credentials in URLs, and none in Zendesk tickets.** Recording links are
+  HMAC-signed and expiring; they carry no Vobiz or Zendesk credentials.
+- **Credentials stay on the backend.** The Vobiz Auth Token, the SIP password
+  and the Zendesk API token are read from `backend/.env`. Signing in exchanges
+  the Auth ID and Auth Token for an opaque session token held in
+  `sessionStorage`; the SIP identity is served only to a signed-in session.
+- **Everything interpolated into VobizXML is validated and escaped.** Caller IDs
+  must be numbers the account owns.
+- **CORS is scoped** to Zendesk's app origins (`*.apps.zdusercontent.com`,
+  `*.zendesk.com`) plus anything listed in `ALLOWED_ORIGINS` — never `*`.
+- The webhook routes Vobiz calls (`/answer`, `/dial-status`,
+  `/recording-ready`) are necessarily public. Read [SECURITY.md](SECURITY.md)
+  before deploying.
 
 To report a vulnerability: [SECURITY.md](SECURITY.md). Please do not open a
 public issue.

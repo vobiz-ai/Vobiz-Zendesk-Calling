@@ -3,6 +3,38 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+- `GET /agent` is behind the session again; `/agent/:agentId`, `/session/:agentId`,
+  `/recordings/:agentId` and `/recording-audio/:agentId/:id` are removed. The
+  per-id routes served the SIP password and recordings without a session.
+- Recording playback requires a valid signature. Ticket links are signed over
+  the call UUID with their own TTL (`TICKET_RECORDING_LINK_TTL_SECONDS`).
+- Zendesk credentials and subdomain come from `.env` only; a request could
+  previously send the API token to a host of its choosing.
+- `/transcription-ready` is off unless `TRANSCRIPTION_WEBHOOK_SECRET` is set.
+- Caller IDs and destinations are validated and XML-escaped; SIP-direct caller
+  IDs must be owned by the account.
+- The panel no longer stores the SIP password in `localStorage`.
+
+### Changed
+- Nothing is changed on the Vobiz account at boot. `POST /setup` binds the
+  endpoint; only `POST /setup-inbound` attaches the number, via the documented
+  `POST /numbers/{e164}/application`.
+- Inbound calls carry the caller in `callerName`; the panel looks them up in
+  Zendesk while ringing and opens their profile on answer.
+- `.zcliignore` keeps the backend out of the app package; `npm run package`
+  produces a real zip on Linux.
+- Top-bar icon is the Vobiz mark.
+
+### Fixed
+- Recent recordings list was always empty (read the wrong response field).
+- Inbound calls were logged against the last outbound number.
+
+### Added
+- `npm test`: backend behaviour and security regression tests, run in CI.
+
 ## [2.0.0] — 2026-09-17
 
 Rebuilt on the browser-as-A-leg architecture. **Breaking:** the backend no

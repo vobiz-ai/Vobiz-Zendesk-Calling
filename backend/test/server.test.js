@@ -126,8 +126,8 @@ test('signed panel link plays the recording; tampering breaks it', async () => {
 
 test('ticket link is signed, credential-free, and plays only that call', async () => {
   const token = await login();
-  await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '919999999999', CallUUID: 'call-1' }));
-  const rec = await (await req('/call-record?to=919999999999', { headers: { Authorization: `Bearer ${token}` } })).json();
+  await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '910000000099', CallUUID: 'call-1' }));
+  const rec = await (await req('/call-record?to=910000000099', { headers: { Authorization: `Bearer ${token}` } })).json();
   assert.equal(rec.callUuid, 'call-1');
   const u = new URL(rec.recordingUrl);
   assert.equal(u.origin, 'https://backend.example.test');
@@ -140,16 +140,16 @@ test('ticket link is signed, credential-free, and plays only that call', async (
 
 // ─── VobizXML ────────────────────────────────────────────────────────────────
 test('outbound answer: browser A leg gets Record then Dial Number', async () => {
-  const r = await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '919999999999', CallUUID: 'u-out' }));
+  const r = await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '910000000099', CallUUID: 'u-out' }));
   const xml = await r.text();
   assert.match(xml, /<Record [^>]*recordSession="true"[^>]*\/>\s*<Dial /);
   assert.match(xml, /<Dial callerId="\+910000000001"[^>]*action="https:\/\/backend\.example\.test\/dial-status"[^>]*redirect="false">/);
-  assert.match(xml, /<Number>919999999999<\/Number>/);
+  assert.match(xml, /<Number>910000000099<\/Number>/);
 });
 
 test('inbound answer: Dial User with callerId = dialled DID in E.164', async () => {
-  const xml = await (await req('/answer', form({ From: '919811111111', To: '918000000002', CallUUID: 'u-in' }))).text();
-  assert.match(xml, /<Dial callerId="\+918000000002" callerName="919811111111"/);
+  const xml = await (await req('/answer', form({ From: '910000000097', To: '910000000098', CallUUID: 'u-in' }))).text();
+  assert.match(xml, /<Dial callerId="\+910000000098" callerName="910000000097"/);
   assert.match(xml, /<User>sip:testagent123@registrar\.vobiz\.ai<\/User>/);
 });
 
@@ -162,7 +162,7 @@ test('a caller ID cannot inject XML into the answer document', async () => {
   const evil = '+1"/><Number>19005550100</Number></Dial><Dial callerId="+1';
   const r = await req('/login-sip', jsonPost({ sipUser: 'testagent123', callerId: evil }));
   assert.equal(r.status, 400);
-  const xml = await (await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '919999999999', CallUUID: 'u-x', 'X-VH-Caller-ID': evil }))).text();
+  const xml = await (await req('/answer', form({ From: 'sip:testagent123@registrar.vobiz.ai', To: '910000000099', CallUUID: 'u-x', 'X-VH-Caller-ID': evil }))).text();
   assert.ok(!xml.includes('19005550100'));
   assert.equal((xml.match(/<Dial /g) || []).length, 1);
 });
@@ -173,7 +173,7 @@ test('a destination that is not a phone number is rejected, not dialled', async 
 });
 
 test('/login-sip only accepts numbers the account owns', async () => {
-  assert.equal((await req('/login-sip', jsonPost({ sipUser: 'testagent123', callerId: '+919999999999' }))).status, 400);
+  assert.equal((await req('/login-sip', jsonPost({ sipUser: 'testagent123', callerId: '+910000000099' }))).status, 400);
   assert.equal((await req('/login-sip', jsonPost({ sipUser: 'testagent123', callerId: '+910000000002' }))).status, 200);
 });
 

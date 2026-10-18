@@ -1,154 +1,44 @@
-# Testing this in Zendesk
+# Testing
 
-Six steps. Steps 1–3 are one-time; after that testing is `npm start` + `zcli apps:server`.
-
-Nothing is currently running and `backend/.env` is empty — the old build took
-credentials from the browser on every call, which is exactly what was removed,
-so the backend needs its own config for the first time.
-
----
-
-## 1. Create the SIP endpoint and fill in `.env`
+## Automated
 
 ```bash
-npm install
-
-VOBIZ_AUTH_ID=MA_xxxxxxxx VOBIZ_AUTH_TOKEN=xxxxxxxx node bootstrap.js
+npm ci --prefix backend
+npm test               # boots the backend with fetch intercepted; no network, no calls
+npm run lint           # every .js parses, every .json is valid
+npm run check:secrets  # no credentials or real numbers in the tree
 ```
 
-Use the account that actually works — the one with balance that owns the DID.
-`bootstrap.js` checks the account owns a number, creates the SIP endpoint,
-**reads the stored username back** (Vobiz rewrites the one you submit), and
-prints the exact `.env` lines to paste in.
+`npm test` drives the real backend over HTTP: the answer XML in both
+directions, session gating of the SIP identity, signed recording links, input
+validation in the XML, Zendesk credential handling, CORS, and what `/setup` and
+`/setup-inbound` change on the account. CI runs all three.
 
-If it finds the old `zendeskagent1187694299…` endpoint it will offer to reuse
-it. **Rotate instead** — that password was committed to git in `agents.json`:
+## Manual, against a live account
 
-```bash
-VOBIZ_AUTH_ID=… VOBIZ_AUTH_TOKEN=… node bootstrap.js --new
-```
+Every call here is real and billed.
 
-## 2. Expose the backend over public HTTPS
+1. **Answer URL.** From outside your network:
+   `curl -s -X POST "$PUBLIC_BASE/answer" -d "From=sip:x@registrar.vobiz.ai&To=91XXXXXXXXXX&RouteType=sip"`
+   must return `<Record …/>` then `<Dial …><Number>`.
+2. **Health.** `curl -s localhost:8092/health` shows your account, caller ID,
+   SIP user and `publicBase`.
+3. **Sign in.** In Zendesk with `?zcli_apps=true`, open the panel, sign in, and
+   wait for **READY**.
+4. **Outbound.** Call a phone you have with you. The backend logs
+   `DIAL RESULT status=… bleg=<uuid>`; an empty `bleg` means the customer leg was
+   never created.
+5. **Ticket log.** Make the call from an open ticket. A private note appears with
+   direction, duration and a recording link. The link plays once the recording
+   is ready (usually within a minute).
+6. **Inbound.** Click **Enable inbound calls**, then call `VOBIZ_FROM_NUMBER`
+   from another phone. The panel rings with the caller's number (and name, if
+   a Zendesk user has that phone number); **Enter** accepts.
 
-Vobiz has to reach `/answer`, `/dial-status` and `/recording-ready`.
-
-```bash
-cloudflared tunnel --url http://localhost:8092
-```
-
-Put the resulting `https://…` into `PUBLIC_BASE` in `.env`.
-
-> If you run several Vobiz backends behind one ngrok domain, put a path router
-> in front and set `PUBLIC_BASE` to `https://<domain>/<prefix>`. Two ngrok
-> tunnels pointed at one domain get *pooled* and round-robined, so webhooks
-> reach the right server about half the time.
-
-## 3. Start the backend and prove the answer URL is alive
-
-```bash
-npm start     # :8092
-```
-
-**Do this before touching any UI.** A dead answer URL produces the exact symptom
-people blame on registration — the customer answers, hears ringback, then "the
-agent could not be reached":
-
-```bash
-curl -s -X POST "$PUBLIC_BASE/answer" \
-  -d "From=sip:x@registrar.vobiz.ai&To=91XXXXXXXXXX&RouteType=sip"
-```
-
-You must get back `<Response>` containing `<Dial …><Number>`. Anything else —
-an ngrok interstitial, a 404 page, a tunnel error — and every call will die.
-
-Also check `curl -s localhost:8092/health` shows your account, caller ID, SIP
-user and `publicBase`.
-
-## 4. Run the app
-
-```bash
-cd ../zendesk-app
-zcli apps:server .
-```
-
-zcli 2.0.0 is already installed. `apps:server` needs **no login** — it just
-prompts for the settings on each run. (`apps:validate` and `apps:package` *do*
-need `zcli login`; you only need those at packaging time, not to test.)
-
-Answer the prompts:
-
-| Setting | Value |
-|---|---|
-| `backend_url` | your tunnel URL from step 2 |
-| `agent_id` | anything, e.g. `test-agent` |
-| `registrar_url` | press enter for the default |
-
-It serves on `http://localhost:4567`.
-
-## 5. Open Zendesk
-
-```
-https://<subdomain>.zendesk.com/agent/dashboard?zcli_apps=true
-```
-
-Two browser things that fail **silently** if you skip them:
-
-- **Allow insecure content.** Zendesk is HTTPS and zcli serves plain HTTP. Lock
-  icon → Site settings → Insecure content → **Allow**, then reload. Without it
-  the panel never loads and there is no error.
-- **Allow the microphone** when prompted. Denied, calls ring and connect to
-  silence.
-- Keep `?zcli_apps=true` on the URL through every navigation.
-
-## 6. Make a call
-
-1. Click the Vobiz icon in the top bar.
-2. Sign in with the Vobiz Auth ID and Auth Token. On success the panel
-   automatically binds your SIP endpoint to a Vobiz application pointing at
-   `$PUBLIC_BASE/answer` — watch the browser console for
-   `endpoint … bound to app …`.
-3. **Wait for the status to read `Ready`.** The Call button stays disabled until
-   both the account session and the SIP registration are up. That is deliberate.
-4. Type a real number and hit Call. Your phone rings; answer it.
-5. Hang up, type a note, **Save Call Log**. Open the ticket — the note should be
-   there with duration and a recording link.
-
-Also test the sidebar path: open a ticket whose requester has a phone number and
-click **Call requester** in the Vobiz sidebar.
-
----
-
-## Reading the result
-
-The backend log is the honest account of what happened:
-
-```
-WEBHOOK POST /answer {"From":"sip:zendeskagent…","To":"91XXXXXXXXXX","RouteType":"sip"}
-  -> browser is the A leg, dialling out to 91XXXXXXXXXX as +91…
-DIAL RESULT status=completed ring=true cause=NORMAL_CLEARING bleg=abc-123 dur=42
-RECORDING READY call=… id=… reason=…
-```
-
-**`DialBLegUUID` is the single most useful field in this stack.** Present means
-it connected. Empty means no B leg was ever created, whatever the panel showed.
-
-| What you see | What it means |
-|---|---|
-| No `WEBHOOK /answer` line at all | The endpoint is not bound to the application, or `PUBLIC_BASE` is wrong. Sign out and back in to re-run `/setup` |
-| `bleg=(none…)` | Destination unreachable, or the caller ID is not owned by this account |
-| Panel stuck on "Connecting…" | Backend unreachable — check `backend_url` and that insecure content is allowed |
-| `Registration failed` | Wrong `VOBIZ_SIP_USER` — you probably used the username you submitted, not the one Vobiz stored |
-| No CDR at all in Vobiz | `422 Session Interval Too Small` — a session-timer problem |
-| CDR billed `0s` | SDP/ICE — check the browser console for the STUN candidates |
-| `OPTIONS 204` with no request after it | CORS preflight failed — a header is missing from `Access-Control-Allow-Headers` |
-
-Ignore the Endpoint API's `sip_registered` entirely. It reads `"false"` even
-when registration genuinely succeeded, on every endpoint on the account.
-
-## What will not work
-
-**Inbound PSTN → browser.** `<Dial><User>` into a registered WebRTC endpoint is
-blocked platform-side ([`../ISSUES.md`](../ISSUES.md) #1). The customer will hear ringback then
-"the agent could not be reached", and nothing will ring in the panel. The code
-path is correct and starts working the day Vobiz fixes its gateway URI — do not
-spend time debugging it.
+| Symptom | Look at |
+| --- | --- |
+| Panel never reaches READY | SIP username must be the stored one, with its numeric suffix |
+| Call fails instantly, nothing in the backend log | Vobiz cannot reach `PUBLIC_BASE/answer` — re-run check 1 |
+| `bleg=(none …)` | Destination unreachable, or the caller ID is not on this account |
+| CDR billed 0s | Network/ICE — try another network; STUN must reach `stun.l.google.com:19302` |
+| `OPTIONS 204` and no request after it | CORS preflight failed — add your origin to `ALLOWED_ORIGINS` |

@@ -1,246 +1,144 @@
 # Backend API contract
 
-Every route `backend/server.js` exposes. Use this to replace the backend with
-your own implementation, or to understand what the app expects.
+Every route `backend/server.js` exposes. Use it to replace the backend with your
+own implementation, or to understand what the app expects. `backend/test/`
+exercises most of these over HTTP.
 
-Routes fall into two groups:
+Two groups:
 
-- **Browser routes** — called by the Zendesk app.
-- **Webhooks** — called by the Vobiz platform. These must be reachable from the
-  public internet.
+- **Webhooks** — called by Vobiz. Public, form-encoded (`application/x-www-form-urlencoded`), never behind a session.
+- **Browser routes** — called by the Zendesk app with `Authorization: Bearer <session token>` where marked **session**. JSON bodies.
 
-> **None of these routes are authenticated.** See
-> [SECURITY.md](../SECURITY.md#the-backend-is-unauthenticated) before exposing
-> this beyond a development tunnel.
+The backend is bound to one Vobiz account, one caller ID and one SIP endpoint
+through `backend/.env`.
 
-## Conventions
+---
 
-Base URL is the app's `backend_url` setting. Bodies are JSON unless stated.
-Vobiz credentials may be supplied three ways, in order of precedence:
+## Webhooks (Vobiz → backend)
 
-1. the request body or query string (`authId` / `authToken`),
-2. the `X-Auth-ID` / `X-Auth-Token` headers,
-3. `VOBIZ_AUTH_ID` / `VOBIZ_AUTH_TOKEN` in the backend environment.
+### `GET|POST /answer` (also `/inbound-answer`)
 
-The app uses the first. The third exists for unattended testing.
+The answer URL of the Vobiz application the SIP endpoint and the DID are
+attached to. One handler, two directions, decided by `From`:
+
+**Outbound** — `From` is a `sip:` URI (or `RouteType=sip`): the browser sent the
+INVITE. Returns:
+
+```xml
+<Response>
+  <Record fileFormat="mp3" recordSession="true" maxLength="3600" playBeep="false"
+          redirect="false" callbackUrl="{PUBLIC_BASE}/recording-ready" callbackMethod="POST"/>
+  <Dial callerId="{caller ID}" timeout="30" timeLimit="14400"
+        action="{PUBLIC_BASE}/dial-status" method="POST" redirect="false">
+    <Number>{To}</Number>
+  </Dial>
+</Response>
+```
+
+The caller ID is, in order: an `X-VH-Caller-ID` SIP header from the panel, the
+number chosen in the panel, `VOBIZ_FROM_NUMBER`. `To` and the caller ID must be
+plain phone numbers, otherwise the call is rejected with
+`<Hangup reason="rejected"/>`.
+
+**Inbound** — `From` is a phone number. Returns the same `<Record>`, then
+`<Dial callerId="{dialled DID in E.164}" …><User>sip:{VOBIZ_SIP_USER}@registrar.vobiz.ai</User></Dial>`.
+`callerId` must be a number the account owns; the dialled DID is.
+
+**`Event=Hangup`** — returns an empty `<Response></Response>`.
+
+### `GET|POST /dial-status`
+
+The `<Dial action>` target. Records `DialStatus`, `DialHangupCause`,
+`DialBLegUUID` and `DialBLegDuration` against the A-leg `CallUUID`. An empty
+`DialBLegUUID` means no customer leg was ever created.
+
+### `GET|POST /recording-ready`
+
+The `<Record callbackUrl>` target. Records `RecordingID` and
+`RecordingDuration` against the call.
 
 ---
 
 ## Browser routes
 
-### `GET /agent/:agentId`
+### `POST /login`
 
-The SIP identity the softphone registers with. Looked up in `agents.json`.
+`{ "agentId", "authId", "authToken" }` → `{ "token", "numbers", "selected", "authId" }`.
+401 unless `authId` / `authToken` match `.env`.
 
-```json
-{
-  "name": "Priya Sharma",
-  "sipUser": "agent-priya1187694299145202883643",
-  "sipPassword": "…",
-  "displayName": "Priya Sharma"
-}
-```
+### `GET /session` · `POST /logout`
 
-`sipUser` may be a bare username or `user@domain`. The app builds
-`sip:{sipUser}@registrar.vobiz.ai` when no domain is present.
+Session state for the bearer token, and sign-out.
 
-Unknown IDs fall back to a synthesised agent rather than 404ing, which is
-convenient in development and a footgun in production — a typo silently routes
-a call to the wrong endpoint.
+### `POST /login-sip`
 
-### `GET /numbers`
+SIP-direct sign-in: `{ "sipUser", "callerId" }`. Records which caller ID that
+SIP user dials out as. 400 unless `callerId` is a number on this account.
 
-Phone numbers on the account. Proxies the Vobiz numbers API and **caches the
-result in memory**, which `/call-answer` later relies on to tell your own DIDs
-from external numbers.
-
-```
-GET /numbers?authId=MA_XXXXXXXX&authToken=…
-```
+### `GET /agent` — **session**
 
 ```json
-{ "numbers": ["+911140848108", "+911140848109"], "source": "vobiz_api", "count": 2 }
+{ "displayName": "priya (Vobiz)", "sipUser": "zendeskagent1187…@registrar.vobiz.ai",
+  "registrarUrl": "wss://registrar.vobiz.ai:5063/", "sipPassword": "…" }
 ```
 
-| Status | Meaning |
-| --- | --- |
-| 200 | Numbers returned |
-| 400 | Credentials missing |
-| 5xx | Vobiz unreachable |
+### `GET /numbers` · `POST /select-number` — **session**
 
-### `POST /start-call`
+The account's numbers, and choose the outbound caller ID (`{ "number" }`; must
+be on the account).
 
-Places an outbound call. Dials the **customer** first; the agent is bridged in
-when `/call-answer` is fetched. See
-[architecture](architecture.md#an-outbound-call-end-to-end).
+### `POST /setup` — **session**
+
+Finds or creates the Vobiz application whose answer URL is
+`{PUBLIC_BASE}/answer` and binds `VOBIZ_SIP_USER` to it. Called on sign-in.
+
+### `POST /setup-inbound` — **session**
+
+`/setup`, plus attaches `VOBIZ_FROM_NUMBER` to the application
+(`POST /numbers/{e164}/application`). This **detaches the number from any other
+application**.
+
+### `GET /call-record?to=<number>` — **session**
+
+The most recent call to or from that number, polled after hangup:
 
 ```json
-{
-  "to": "+919876543210",
-  "agentId": "priya",
-  "fromNumber": "+911140848108",
-  "authId": "MA_XXXXXXXX",
-  "authToken": "…",
-  "inboundNumber": ""
-}
+{ "found": true, "callUuid": "…", "direction": "Outbound", "from": "+91…", "to": "91…",
+  "duration": 34, "dialStatus": "completed", "bLegUuid": "…", "recordingId": null,
+  "recordingUrl": "{PUBLIC_BASE}/play-recording?callUuid=…&exp=…&sig=…" }
 ```
 
-Returns the Vobiz response unchanged:
+### `GET /recordings?limit=15` — **session**
 
-```json
-{ "api_id": "bf2cf586-…", "message": "call queued", "request_uuid": "e6b09bec-…" }
-```
+`{ "objects": [{ "recording_id", "call_uuid", "add_time", "rounded_recording_duration", "playUrl" }] }`.
+`playUrl` is a signed `/recording-audio/…` link valid for
+`RECORDING_URL_TTL_SECONDS`.
 
-Keep `request_uuid` — it is the call's identity for hangup, recording, and
-logging.
+### `GET /recording-audio/:recordingId?exp=&sig=`
 
-`inboundNumber` is optional. Supply a phone number to bridge the call to that
-phone instead of the browser.
+Streams one recording. 403 without a valid, unexpired signature.
 
-### `POST /hangup-call`
+### `GET /play-recording?callUuid=&exp=&sig=`
 
-Terminates a live call through the REST API.
+The link written into ticket comments. Signed over the call UUID, valid for
+`TICKET_RECORDING_LINK_TTL_SECONDS`. Streams only a recording whose
+`call_uuid` matches; 404 while it is still processing.
 
-```json
-{ "callUuid": "e6b09bec-…", "authId": "MA_XXXXXXXX", "authToken": "…" }
-```
+### `POST /sync-call` — **session**
 
-```json
-{ "ok": true, "result": { … } }
-```
-
-Returns a non-2xx with `{ "ok": false, "error": … }` if Vobiz rejects it. Do
-not treat a 200 as proof the call ended without checking `ok`.
-
-Omitting `callUuid` is a no-op success — the browser's SIP `BYE` already handled
-the hangup.
-
-### `POST /sync-call`
-
-Writes a call log into Zendesk, and mints the recording link.
-
-```json
-{
-  "subdomain": "yourcompany",
-  "email": "agent@yourcompany.com",
-  "apiToken": "…",
-  "ticketId": 12345,
-  "fromNumber": "+911140848108",
-  "toNumber": "+919876543210",
-  "duration": 96,
-  "callDirection": "Outbound",
-  "notes": "Customer asked about billing.",
-  "requesterId": 987,
-  "callUuid": "e6b09bec-…",
-  "authId": "MA_XXXXXXXX",
-  "authToken": "…"
-}
-```
-
-```json
-{ "success": true, "mode": "standard_api", "ticketId": 12345, "data": { … } }
-```
-
-`mode` reports which strategy succeeded — the Talk Partner Edition path or the
-standard Tickets API.
-
-If `callUuid`, `authId` and `authToken` are all present, the comment includes a
-recording link of the form `/play-recording?token=…`. **The credentials are
-sealed into that token, never placed in the URL.**
-
-Omit `ticketId` to create a new ticket instead of commenting on one.
-
-### `GET /play-recording`
-
-Streams a recording. Two ways to call it:
-
-```
-GET /play-recording?token=<sealed token>              ← preferred
-GET /play-recording?callUuid=…&authId=…&authToken=…   ← development only
-```
-
-The token form is what `/sync-call` writes into tickets. The credential form
-exists for local testing and should never appear in a URL that gets stored.
-
-| Status | Meaning |
-| --- | --- |
-| 200 | Audio, with the upstream content type |
-| 400 | Neither a token nor credentials supplied |
-| 403 | Token invalid, tampered with, or expired |
-| 404 | No recording for that call |
-
-Tokens expire after `RECORDING_TOKEN_TTL_MS` (default 30 days) and are sealed
-with `RECORDING_TOKEN_SECRET`. Restarting without that secret set invalidates
-every link previously issued.
+`{ "ticketId", "toNumber", "duration", "callDirection", "notes", "requesterId", "callUuid" }`.
+Writes the call to Zendesk with the credentials in `.env` (comment on the
+ticket, or a new ticket), including the signed recording link. 400 when Zendesk
+credentials are not configured, in which case the panel writes through the
+agent's own Zendesk session instead.
 
 ### `POST /transcription-ready`
 
-Appends an AI transcript to a ticket as a private comment.
+Off unless `TRANSCRIPTION_WEBHOOK_SECRET` is set. Requires
+`Authorization: Bearer <secret>`. `{ "ticketId", "transcript", "callId" }`
+appends the transcript as a private comment.
 
-```json
-{
-  "subdomain": "yourcompany",
-  "email": "agent@yourcompany.com",
-  "apiToken": "…",
-  "ticketId": 12345,
-  "transcript": "Agent: Good morning…",
-  "callId": "e6b09bec-…"
-}
-```
+### `GET /health`
 
-```json
-{ "success": true, "ticketId": 12345, "data": { … } }
-```
-
----
-
-## Webhooks
-
-Called by Vobiz, not by the browser. **These must be publicly reachable.**
-
-### `GET|POST /call-answer`
-
-The heart of the call flow. Vobiz fetches this when the customer answers, and
-executes whatever XML comes back.
-
-| Parameter | Purpose |
-| --- | --- |
-| `agentId` | Which agent to bridge to |
-| `fromNumber` | Caller ID for the second leg |
-| `inboundNumber` | If a dialable external number, bridge to that phone instead of the browser |
-
-Returns `text/xml`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Dial record="true" redirect="false" callerId="+911140848108">
-    <User>agent-priya1187694299145202883643</User>
-  </Dial>
-</Response>
-```
-
-`<User>` bridges to the registered WebRTC endpoint; `<Number>` bridges to a
-phone. Every interpolated value is XML-escaped, and `callerId` is emitted only
-when the value is dialable — this endpoint's output is executed by the
-platform, so unescaped input here is a call-flow injection.
-
----
-
-## Implementing your own backend
-
-The minimum for outbound calling with browser audio:
-
-1. `GET /agent/:agentId` — return a SIP identity.
-2. `POST /start-call` — dial the customer, pointing `answer_url` at your own
-   `/call-answer`.
-3. `GET /call-answer` — return `<Dial><User>…</User></Dial>`.
-
-`/numbers`, `/hangup-call`, `/sync-call`, `/play-recording` and
-`/transcription-ready` add number selection, REST hangup, ticket logging and
-recording playback respectively. The app degrades without them rather than
-breaking.
-
-If you implement `/play-recording`, do not accept credentials in the query
-string of a URL you then store somewhere durable. Seal them, or sign a
-short-lived URL.
+Resolved configuration: account ID, caller ID, SIP URI, public base, Zendesk
+subdomain, session and call counts. No secrets.

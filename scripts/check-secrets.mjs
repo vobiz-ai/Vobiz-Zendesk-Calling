@@ -48,7 +48,7 @@ const RULES = [
   {
     name: "real phone number",
     re: /\+\d{11,15}\b/g,
-    allow: [/^\+919876543210$/, /^\+9111408481\d\d$/],
+    allow: [/^\+919876543210$/, /^\+9111408481\d\d$/, /^\+9100000000\d\d$/],
   },
   {
     name: "ephemeral tunnel hostname",
