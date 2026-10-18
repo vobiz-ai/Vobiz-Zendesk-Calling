@@ -130,7 +130,7 @@ browser's Local Network Access / insecure-content prompt for `localhost:4567`.
 3. Wait for **READY**. The Call button stays disabled until the SIP endpoint is
    registered.
 4. Pick the caller ID, type a number in E.164 format, and call — or open a
-   ticket and use **Call** in the Vobiz sidebar.
+   ticket and use **Call requester** in the Vobiz sidebar.
 5. For inbound, click **Enable inbound calls** once. This attaches
    `VOBIZ_FROM_NUMBER` to the application — and detaches it from whatever
    application it was attached to before. Calls to that number then ring the
