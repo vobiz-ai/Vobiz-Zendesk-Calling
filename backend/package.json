@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check zendeskService.js",
+    "check": "node --check server.js && node --check zendeskService.js && node --check vobiz-signature.js",
     "test": "node --test"
   },
   "dependencies": {
