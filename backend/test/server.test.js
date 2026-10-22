@@ -25,6 +25,7 @@ const env = {
   PUBLIC_BASE: 'https://backend.example.test', SIGNING_SECRET: 'test-signing-secret',
   ZENDESK_SUBDOMAIN: 'acme', ZENDESK_EMAIL: 'admin@acme.test', ZENDESK_API_TOKEN: 'test-zendesk-token',
   TRANSCRIPTION_WEBHOOK_SECRET: 'test-webhook-secret',
+  VOBIZ_WEBHOOK_SIGNATURES: 'off',
 };
 
 const ONE = { authId: 'MA_TEST0001', authToken: 'tok-account-one', appId: '43919358318796814' };

@@ -70,6 +70,9 @@ All notable changes to this project are documented here. This project follows
 
 ### Added
 - `npm test`: backend behaviour and security regression tests, run in CI.
+- Vobiz webhook signature verification on callback routes (`/answer`, `/inbound-answer`, `/dial-status`, `/recording-ready`) using V2/V3 HMAC validation.
+- `VOBIZ_WEBHOOK_SIGNATURES` configuration option (`require`, `verify`, `off`), defaulting to `require` (refuses unsigned webhooks with HTTP 403).
+- Automated test coverage for webhook signature validation.
 
 ## [2.0.0] — 2026-09-17
 

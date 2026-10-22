@@ -104,7 +104,13 @@ async function init() {
       const metadata = await client.metadata();
       const settings = normaliseSettings(metadata && metadata.settings);
       backendUrl = String(settings.backend_url || "").trim().replace(/\/+$/, "");
-      if (settings.registrar_url) registrarUrl = String(settings.registrar_url).trim();
+      if (settings.registrar_url) {
+        let r = String(settings.registrar_url).trim();
+        if (r && !r.match(/:\d+/)) {
+          r = r.replace(/\/+$/, "") + ":5063/";
+        }
+        registrarUrl = r;
+      }
 
       const context = await client.context();
       zendeskSubdomain = (context && context.account && context.account.subdomain) || "";
@@ -731,6 +737,9 @@ async function initVobizSip() {
   }
 
   agentIdentity = agent;
+  if (agent && agent.registrarUrl) {
+    registrarUrl = agent.registrarUrl;
+  }
   startSipUA(agent.sipUser, agent.sipPassword, agent.displayName);
 }
 
@@ -853,6 +862,9 @@ function startSipUA(sipUser, sipPassword, displayName) {
   }
 
   try {
+    if (!registrarUrl.match(/:\d+/)) {
+      registrarUrl = registrarUrl.replace(/\/+$/, "") + ":5063/";
+    }
     const cleanUri = sipUser.startsWith("sip:") ? sipUser : `sip:${sipUser}`;
     const vobizSocket = new JsSIP.WebSocketInterface(registrarUrl);
     vobizUA = new JsSIP.UA({

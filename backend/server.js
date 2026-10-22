@@ -25,6 +25,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 require('dotenv').config();
 
 const { syncCallToZendesk, appendTranscription } = require('./zendeskService');
+const { makeVerifier } = require('./vobiz-signature');
 
 // ─── config (deployment only — no Vobiz account values) ─────────────────────
 const PORT = Number(process.env.PORT || 8092);
@@ -33,6 +34,37 @@ const PUBLIC_BASE = (process.env.PUBLIC_BASE || '').replace(/\/+$/, '');
 // Where the authId:agentId -> endpoint map is kept. Ids and usernames only:
 // never a password or a token.
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const VOBIZ_WEBHOOK_SIGNATURES = process.env.VOBIZ_WEBHOOK_SIGNATURES || 'require';
+
+const verifyWebhookSignature = makeVerifier({
+  mode: VOBIZ_WEBHOOK_SIGNATURES,
+  publicBaseUrl: () => PUBLIC_BASE,
+});
+
+function candidateWebhookTokens(req) {
+  const tokens = new Set();
+  if (process.env.VOBIZ_AUTH_TOKEN) tokens.add(process.env.VOBIZ_AUTH_TOKEN);
+  if (process.env.AUTH_TOKEN) tokens.add(process.env.AUTH_TOKEN);
+
+  const authId = (req.body && req.body.ParentAuthID) || (req.query && req.query.ParentAuthID);
+  if (authId && accounts.has(authId) && accounts.get(authId).authToken) {
+    tokens.add(accounts.get(authId).authToken);
+  }
+
+  for (const acct of accounts.values()) {
+    if (acct.authToken) tokens.add(acct.authToken);
+  }
+  return Array.from(tokens);
+}
+
+function requireWebhookSignature(req, res, next) {
+  const tokens = candidateWebhookTokens(req);
+  const verified = verifyWebhookSignature(req, req.path, tokens);
+  if (!verified) {
+    return res.status(403).type('text/plain').send('Forbidden: invalid or missing webhook signature');
+  }
+  next();
+}
 
 const ZENDESK_SUBDOMAIN = process.env.ZENDESK_SUBDOMAIN;
 const ZENDESK_EMAIL = process.env.ZENDESK_EMAIL;
@@ -597,10 +629,10 @@ function handleAnswer(req, res) {
 }
 
 // /inbound-answer is kept as an alias for applications set up by older builds.
-app.get('/answer', handleAnswer);
-app.post('/answer', handleAnswer);
-app.get('/inbound-answer', handleAnswer);
-app.post('/inbound-answer', handleAnswer);
+app.get('/answer', requireWebhookSignature, handleAnswer);
+app.post('/answer', requireWebhookSignature, handleAnswer);
+app.get('/inbound-answer', requireWebhookSignature, handleAnswer);
+app.post('/inbound-answer', requireWebhookSignature, handleAnswer);
 
 function toE164(raw) {
   const s = String(raw || '').trim();
@@ -637,8 +669,8 @@ function handleDialStatus(req, res) {
   }
   res.status(200).end();
 }
-app.get('/dial-status', handleDialStatus);
-app.post('/dial-status', handleDialStatus);
+app.get('/dial-status', requireWebhookSignature, handleDialStatus);
+app.post('/dial-status', requireWebhookSignature, handleDialStatus);
 
 /**
  * <Record callbackUrl>. Fires when the file is actually downloadable — this is
@@ -655,8 +687,8 @@ function handleRecordingReady(req, res) {
   }
   res.status(200).end();
 }
-app.get('/recording-ready', handleRecordingReady);
-app.post('/recording-ready', handleRecordingReady);
+app.get('/recording-ready', requireWebhookSignature, handleRecordingReady);
+app.post('/recording-ready', requireWebhookSignature, handleRecordingReady);
 
 // ══ Endpoints the browser calls ══════════════════════════════════════════════
 
@@ -1070,11 +1102,16 @@ app.use((req, res) => {
   res.status(404).json({ error: `No route for ${req.method} ${req.path}` });
 });
 
-app.listen(PORT, () => {
-  console.log(`Vobiz Zendesk calling backend on http://localhost:${PORT}`);
-  console.log('  accounts    any Vobiz account — agents sign in with their own Auth ID and Auth Token');
-  console.log(`  registrar   ${REGISTRAR}`);
-  console.log(`  data dir    ${DATA_DIR}`);
-  console.log(`  public base ${PUBLIC_BASE || '(NOT SET — Vobiz cannot reach the answer URL, sign-in will refuse)'}`);
-  console.log(`  zendesk     ${ZENDESK_SUBDOMAIN || '(unset — ticket sync disabled)'}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Vobiz Zendesk calling backend on http://localhost:${PORT}`);
+    console.log('  accounts    any Vobiz account — agents sign in with their own Auth ID and Auth Token');
+    console.log(`  registrar   ${REGISTRAR}`);
+    console.log(`  data dir    ${DATA_DIR}`);
+    console.log(`  public base ${PUBLIC_BASE || '(NOT SET — Vobiz cannot reach the answer URL, sign-in will refuse)'}`);
+    console.log(`  signatures  ${VOBIZ_WEBHOOK_SIGNATURES}`);
+    console.log(`  zendesk     ${ZENDESK_SUBDOMAIN || '(unset — ticket sync disabled)'}`);
+  });
+}
+
+module.exports = { app };
